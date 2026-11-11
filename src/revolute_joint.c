@@ -426,7 +426,9 @@ void b3SolveRevoluteJoint( b3JointSim* base, b3StepContext* context, bool useBia
 			// Get the substep relative rotation
 			float targetAngle = joint->targetAngle;
 			float angle = b3GetTwistAngle( relQ );
-			float c = angle - targetAngle;
+
+			// The spring must take the short way to the target, even across the ±pi seam
+			float c = b3UnwindAngle( angle - targetAngle );
 
 			float bias = joint->springSoftness.biasRate * c;
 			float massScale = joint->springSoftness.massScale;

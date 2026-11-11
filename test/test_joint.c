@@ -336,6 +336,60 @@ static int TestMoverJoint( void )
 	return FinishJoint( jointId, f.worldId );
 }
 
+// The revolute joint spring must take the short way to its target, even when the
+// joint angle and the target are on opposite sides of the ±pi seam.
+// See https://github.com/erincatto/box3d/issues/198
+static int TestRevoluteJointSpringShortWay( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.gravity = b3Vec3_zero;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	b3BodyId groundId = b3CreateBody( worldId, &bodyDef );
+
+	// Start at -3.0 rad while the target is +3.0 rad, so the raw difference is
+	// nearly 2 * pi but the short way is only 2 * pi - 6.0 rad.
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.rotation = b3MakeQuatFromAxisAngle( b3Vec3_axisZ, -3.0f );
+	b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+	b3BoxHull box = b3MakeBoxHull( 0.5f, 0.1f, 0.1f );
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3CreateHullShape( bodyId, &shapeDef, &box.base );
+
+	b3RevoluteJointDef def = b3DefaultRevoluteJointDef();
+	def.base.bodyIdA = groundId;
+	def.base.bodyIdB = bodyId;
+	def.enableSpring = true;
+	def.hertz = 2.0f;
+	def.dampingRatio = 1.0f;
+	def.targetAngle = 3.0f;
+	b3JointId jointId = b3CreateRevoluteJoint( worldId, &def );
+
+	ENSURE_SMALL( b3RevoluteJoint_GetAngle( jointId ) + 3.0f, 1.0e-2f );
+
+	// Track the total rotation so going the long way round cannot hide behind
+	// the angle wrapping back into [-pi, pi].
+	float previousAngle = b3RevoluteJoint_GetAngle( jointId );
+	float totalRotation = 0.0f;
+	for ( int i = 0; i < 180; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+		float angle = b3RevoluteJoint_GetAngle( jointId );
+		totalRotation += b3UnwindAngle( angle - previousAngle );
+		previousAngle = angle;
+	}
+
+	// The spring settled on the target
+	ENSURE_SMALL( b3RevoluteJoint_GetAngle( jointId ) - 3.0f, 0.01f );
+
+	// The short way from -3.0 rad to +3.0 rad is -2 * (pi - 3.0) rad
+	ENSURE_SMALL( totalRotation + 2.0f * ( B3_PI - 3.0f ), 0.01f );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
 // A box held up by a pogo spring under gravity should settle at the rest length
 static int TestPogoJoint( void )
 {
@@ -787,6 +841,7 @@ int JointTest( void )
 	RUN_SUBTEST( TestPogoJoint );
 	RUN_SUBTEST( TestPrismaticJoint );
 	RUN_SUBTEST( TestRevoluteJoint );
+	RUN_SUBTEST( TestRevoluteJointSpringShortWay );
 	RUN_SUBTEST( TestSphericalJoint );
 	RUN_SUBTEST( TestWeldJoint );
 	RUN_SUBTEST( TestWheelJoint );
