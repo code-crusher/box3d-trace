@@ -296,6 +296,137 @@ static int TestMotorJoint( void )
 	return FinishJoint( jointId, f.worldId );
 }
 
+// Issue #190: the motor joint keeps warm starting the impulse it built up when a spring or motor
+// limit is set to zero. The solve step skips a constraint whose limit is zero, so the stale impulse
+// has to be cleared in prepare. Each case holds a body against gravity (or an applied torque) and
+// then releases it by zeroing the limit.
+static int TestMotorJointZeroLimit( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.enableSleep = false;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_kinematicBody;
+	bodyDef.position = (b3Pos){ 0.0f, 5.0f, 0.0f };
+	b3BodyId anchorId = b3CreateBody( worldId, &bodyDef );
+
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.position = (b3Pos){ 0.0f, 3.0f, 0.0f };
+	b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 1.0f;
+	b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, 0.5f };
+	b3CreateSphereShape( bodyId, &shapeDef, &sphere );
+
+	// The linear spring holds the body up against gravity
+	b3MotorJointDef def = b3DefaultMotorJointDef();
+	def.base.bodyIdA = anchorId;
+	def.base.bodyIdB = bodyId;
+	def.base.localFrameA.p = (b3Vec3){ 0.0f, -2.0f, 0.0f };
+	def.linearHertz = 4.0f;
+	def.linearDampingRatio = 1.0f;
+	def.maxSpringForce = 1000.0f;
+	b3JointId jointId = b3CreateMotorJoint( worldId, &def );
+
+	for ( int i = 0; i < 60; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	ENSURE_SMALL( b3Body_GetLinearVelocity( bodyId ).y, 0.05f );
+	ENSURE( b3Length( b3Joint_GetConstraintForce( jointId ) ) > 1.0f );
+
+	// Zeroing the spring force limit releases the body, exactly like destroying the joint
+	b3MotorJoint_SetMaxSpringForce( jointId, 0.0f );
+	for ( int i = 0; i < 60; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	ENSURE_SMALL( b3Body_GetLinearVelocity( bodyId ).y + 10.0f, 0.5f );
+	ENSURE( b3Joint_GetConstraintForce( jointId ).y == 0.0f );
+
+	// The velocity motor holds the body at rest against gravity
+	b3Body_SetLinearVelocity( bodyId, b3Vec3_zero );
+	b3Body_SetTransform( bodyId, (b3Pos){ 0.0f, 3.0f, 0.0f }, b3Quat_identity );
+	b3MotorJoint_SetLinearVelocity( jointId, b3Vec3_zero );
+	b3MotorJoint_SetMaxVelocityForce( jointId, 1000.0f );
+
+	for ( int i = 0; i < 60; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	ENSURE_SMALL( b3Body_GetLinearVelocity( bodyId ).y, 0.05f );
+	ENSURE( b3Length( b3Joint_GetConstraintForce( jointId ) ) > 1.0f );
+
+	b3MotorJoint_SetMaxVelocityForce( jointId, 0.0f );
+	for ( int i = 0; i < 60; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	ENSURE_SMALL( b3Body_GetLinearVelocity( bodyId ).y + 10.0f, 0.5f );
+	ENSURE( b3Joint_GetConstraintForce( jointId ).y == 0.0f );
+
+	// The angular spring holds the body against an applied torque
+	b3Body_SetLinearVelocity( bodyId, b3Vec3_zero );
+	b3Body_SetAngularVelocity( bodyId, b3Vec3_zero );
+	b3Body_SetTransform( bodyId, (b3Pos){ 0.0f, 3.0f, 0.0f }, b3Quat_identity );
+	b3MotorJoint_SetMaxVelocityForce( jointId, 0.0f );
+	b3MotorJoint_SetAngularHertz( jointId, 4.0f );
+	b3MotorJoint_SetAngularDampingRatio( jointId, 1.0f );
+	b3MotorJoint_SetMaxSpringTorque( jointId, 1000.0f );
+
+	for ( int i = 0; i < 60; ++i )
+	{
+		b3Body_ApplyTorque( bodyId, (b3Vec3){ 0.0f, 0.0f, 5.0f }, true );
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	ENSURE_SMALL( b3Body_GetAngularVelocity( bodyId ).z, 0.05f );
+	ENSURE( b3Length( b3Joint_GetConstraintTorque( jointId ) ) > 1.0f );
+
+	b3MotorJoint_SetMaxSpringTorque( jointId, 0.0f );
+	for ( int i = 0; i < 60; ++i )
+	{
+		b3Body_ApplyTorque( bodyId, (b3Vec3){ 0.0f, 0.0f, 5.0f }, true );
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	ENSURE( b3Body_GetAngularVelocity( bodyId ).z > 1.0f );
+	ENSURE( b3Joint_GetConstraintTorque( jointId ).z == 0.0f );
+
+	// The velocity motor holds the body against an applied torque
+	b3Body_SetAngularVelocity( bodyId, b3Vec3_zero );
+	b3MotorJoint_SetAngularVelocity( jointId, b3Vec3_zero );
+	b3MotorJoint_SetMaxVelocityTorque( jointId, 1000.0f );
+
+	for ( int i = 0; i < 60; ++i )
+	{
+		b3Body_ApplyTorque( bodyId, (b3Vec3){ 0.0f, 0.0f, 5.0f }, true );
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	ENSURE_SMALL( b3Body_GetAngularVelocity( bodyId ).z, 0.05f );
+	ENSURE( b3Length( b3Joint_GetConstraintTorque( jointId ) ) > 1.0f );
+
+	b3MotorJoint_SetMaxVelocityTorque( jointId, 0.0f );
+	for ( int i = 0; i < 60; ++i )
+	{
+		b3Body_ApplyTorque( bodyId, (b3Vec3){ 0.0f, 0.0f, 5.0f }, true );
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	ENSURE( b3Body_GetAngularVelocity( bodyId ).z > 1.0f );
+	ENSURE( b3Joint_GetConstraintTorque( jointId ).z == 0.0f );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
 static int TestMoverJoint( void )
 {
 	JointFixture f = CreateJointFixture();
@@ -783,6 +914,7 @@ int JointTest( void )
 	RUN_SUBTEST( TestDistanceJoint );
 	RUN_SUBTEST( TestFilterJoint );
 	RUN_SUBTEST( TestMotorJoint );
+	RUN_SUBTEST( TestMotorJointZeroLimit );
 	RUN_SUBTEST( TestMoverJoint );
 	RUN_SUBTEST( TestPogoJoint );
 	RUN_SUBTEST( TestPrismaticJoint );

@@ -228,6 +228,28 @@ void b3PrepareMotorJoint( b3JointSim* base, b3StepContext* context )
 
 	joint->angularMass = b3InvertMatrix( invInertiaSum );
 
+	// The solver skips a spring or motor whose limit is zero, so clear the impulse it built up.
+	// Otherwise warm starting keeps applying that stale impulse and the joint never lets go.
+	if ( joint->maxSpringForce <= 0.0f || joint->linearHertz <= 0.0f )
+	{
+		joint->linearSpringImpulse = b3Vec3_zero;
+	}
+
+	if ( joint->maxVelocityForce <= 0.0f )
+	{
+		joint->linearVelocityImpulse = b3Vec3_zero;
+	}
+
+	if ( joint->maxSpringTorque <= 0.0f || joint->angularHertz <= 0.0f )
+	{
+		joint->angularSpringImpulse = b3Vec3_zero;
+	}
+
+	if ( joint->maxVelocityTorque <= 0.0f )
+	{
+		joint->angularVelocityImpulse = b3Vec3_zero;
+	}
+
 	if ( context->enableWarmStarting == false )
 	{
 		joint->linearVelocityImpulse = b3Vec3_zero;
