@@ -345,13 +345,12 @@ static int MeshCreators( void )
 // A wide box overlaps more triangles than the mesh contact query buffer holds. Every triangle
 // under the box must reach the narrow phase, so the reduced manifold has to reach all four sides
 // of the footprint. Issue #184.
-static int MeshManyTriangles( void )
+static int MeshDenseContact( int gridCount, float cellWidth )
 {
 	b3WorldDef worldDef = b3DefaultWorldDef();
 	b3WorldId worldId = b3CreateWorld( &worldDef );
 
-	// The box footprint covers 24 x 24 cells, which is 1152 triangles.
-	b3MeshData* mesh = b3CreateGridMesh( 40, 40, 0.25f, 0, false );
+	b3MeshData* mesh = b3CreateGridMesh( gridCount, gridCount, cellWidth, 0, false );
 	ENSURE( mesh != NULL );
 
 	b3BodyDef bodyDef = b3DefaultBodyDef();
@@ -403,6 +402,15 @@ static int MeshManyTriangles( void )
 
 	b3DestroyWorld( worldId );
 	b3DestroyMesh( mesh );
+	return 0;
+}
+
+// The 6 x 6 footprint is 24 x 24 cells in the first case (1152 triangles, two doublings) and
+// 64 x 64 cells in the dense case (8192 triangles, four doublings).
+static int MeshManyTriangles( void )
+{
+	ENSURE( MeshDenseContact( 40, 0.25f ) == 0 );
+	ENSURE( MeshDenseContact( 80, 0.09375f ) == 0 );
 	return 0;
 }
 

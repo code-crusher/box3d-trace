@@ -1573,9 +1573,8 @@ public:
 
 static int sampleHugeBox = RegisterSample( "Issues", "Huge Box", HugeBox::Create );
 
-// This demonstrates this cap on mesh complexity. B3_MAX_MESH_CONTACT_TRIANGLES
-// It generates this warning:
-// Box3D: WARNING: complex mesh detected, triangle buffer capacity of 256 reached
+// A tilted cylinder whose bounds cover more than 512 height field triangles. The mesh contact
+// query grows past its initial capacity so every overlapping triangle reaches the narrow phase.
 class HeightfieldIssue : public Sample
 {
 public:

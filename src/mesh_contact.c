@@ -11,9 +11,13 @@
 
 #include "box3d/types.h"
 
-#include <stdio.h>
+#include <string.h>
 
 #define B3_MAX_POINTS_PER_TRIANGLE 32
+
+// The triangle query starts with this many slots in the worker's arena and doubles when full.
+// Most contacts fit, so only dense meshes pay for the larger buffers.
+#define B3_INITIAL_TRIANGLE_CAPACITY 512
 
 #if B3_ENABLE_VALIDATION
 static bool b3IsSorted( const int* array, int count )
@@ -32,6 +36,7 @@ static bool b3IsSorted( const int* array, int count )
 
 typedef struct b3TriangleQueryContext
 {
+	b3Arena* arena;
 	int* indices;
 	int capacity;
 	int count;
@@ -41,37 +46,20 @@ static bool b3CollectTriangleIndicesCallback( b3Vec3 a, b3Vec3 b, b3Vec3 c, int 
 {
 	B3_UNUSED( a, b, c );
 	b3TriangleQueryContext* triangleContext = (b3TriangleQueryContext*)context;
+
+	// Keep going when the buffer fills so every overlapping triangle is collected.
 	if ( triangleContext->count == triangleContext->capacity )
 	{
-		return false;
+		int capacity = 2 * triangleContext->capacity;
+		int* indices = b3Bump( triangleContext->arena, capacity * sizeof( int ) );
+		memcpy( indices, triangleContext->indices, triangleContext->count * sizeof( int ) );
+		triangleContext->indices = indices;
+		triangleContext->capacity = capacity;
 	}
+
 	triangleContext->indices[triangleContext->count] = triangleIndex;
 	triangleContext->count += 1;
-	return triangleContext->count < triangleContext->capacity;
-}
-
-static int b3QueryMeshTriangles( int* indices, int capacity, const b3Mesh* mesh, b3AABB bounds )
-{
-	b3TriangleQueryContext context = {
-		.indices = indices,
-		.capacity = capacity,
-		.count = 0,
-	};
-
-	b3QueryMesh( mesh, bounds, b3CollectTriangleIndicesCallback, &context );
-	return context.count;
-}
-
-static int b3QueryHeightFieldTriangles( int* indices, int capacity, const b3HeightFieldData* heightField, b3AABB bounds )
-{
-	b3TriangleQueryContext context = {
-		.indices = indices,
-		.capacity = capacity,
-		.count = 0,
-	};
-
-	b3QueryHeightField( heightField, bounds, b3CollectTriangleIndicesCallback, &context );
-	return context.count;
+	return true;
 }
 
 static void b3RefreshCache( b3Contact* contact, const b3Shape* shapeA, b3WorldTransform xfA, const b3AABB* bounds, b3Arena arena )
@@ -102,33 +90,29 @@ static void b3RefreshCache( b3Contact* contact, const b3Shape* shapeA, b3WorldTr
 	meshContact->queryBounds.upperBound = b3Add( bounds->upperBound, extension );
 
 	// Query triangles
-	int triangleCapacity = B3_MAX_MESH_CONTACT_TRIANGLES;
-	int* triangleIndices = b3Bump( &arena, B3_MAX_MESH_CONTACT_TRIANGLES * sizeof( int ) );
+	b3TriangleQueryContext queryContext = {
+		.arena = &arena,
+		.indices = b3Bump( &arena, B3_INITIAL_TRIANGLE_CAPACITY * sizeof( int ) ),
+		.capacity = B3_INITIAL_TRIANGLE_CAPACITY,
+		.count = 0,
+	};
 
 	// Bounds are in world space. Convert to the local mesh frame. The broadphase bounds are float,
 	// so the demoted mesh transform is the matching float world frame (exact in float mode).
 	b3Transform meshTransform = b3ToRelativeTransform( xfA, b3Pos_zero );
 	b3AABB localBounds = b3AABB_Transform( b3InvertTransform( meshTransform ), meshContact->queryBounds );
-	int triangleCount;
 	if ( shapeA->type == b3_meshShape )
 	{
-		triangleCount = b3QueryMeshTriangles( triangleIndices, triangleCapacity, &shapeA->mesh, localBounds );
+		b3QueryMesh( &shapeA->mesh, localBounds, b3CollectTriangleIndicesCallback, &queryContext );
 	}
 	else
 	{
 		B3_ASSERT( shapeA->type == b3_heightShape );
-		triangleCount = b3QueryHeightFieldTriangles( triangleIndices, triangleCapacity, shapeA->heightField, localBounds );
+		b3QueryHeightField( shapeA->heightField, localBounds, b3CollectTriangleIndicesCallback, &queryContext );
 	}
 
-	if ( triangleCount == triangleCapacity )
-	{
-		static bool s_once = false;
-		if ( s_once == false )
-		{
-			b3Log( "WARNING: complex mesh detected, triangle buffer capacity of %d reached", triangleCapacity );
-			s_once = true;
-		}
-	}
+	int* triangleIndices = queryContext.indices;
+	int triangleCount = queryContext.count;
 
 	// Triangle indices must be sorted to match caches.
 	B3_VALIDATE( b3IsSorted( triangleIndices, triangleCount ) );

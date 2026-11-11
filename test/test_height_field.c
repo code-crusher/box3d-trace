@@ -7,6 +7,7 @@
 #include "shape.h"
 #include "simd.h"
 
+#include "box3d/box3d.h"
 #include "box3d/collision.h"
 #include "box3d/math_functions.h"
 
@@ -673,6 +674,71 @@ static int RayCastClockwiseWinding( void )
 	return 0;
 }
 
+// A wide box overlaps more height field triangles than the mesh contact query buffer holds. Every
+// triangle under the box must reach the narrow phase. Issue #184.
+static int ManyTrianglesContact( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	// The box footprint covers 24 x 24 cells, which is 1152 triangles.
+	b3HeightFieldData* hf = b3CreateGrid( 40, 40, (b3Vec3){ 0.25f, 1.0f, 0.25f }, false );
+	ENSURE( hf != NULL );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	b3BodyId groundId = b3CreateBody( worldId, &bodyDef );
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3CreateHeightFieldShape( groundId, &shapeDef, hf );
+
+	// The grid spans x and z in [0, 9.75], so center the box in that span
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.position = (b3Pos){ 4.875f, 0.5f, 4.875f };
+	b3BodyId boxId = b3CreateBody( worldId, &bodyDef );
+
+	b3BoxHull box = b3MakeBoxHull( 3.0f, 0.5f, 3.0f );
+	b3ShapeId boxShapeId = b3CreateHullShape( boxId, &shapeDef, &box.base );
+
+	for ( int step = 0; step < 30; ++step )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	b3Pos position = b3Body_GetPosition( boxId );
+	b3Quat rotation = b3Body_GetRotation( boxId );
+
+	ENSURE( b3AbsFloat( (float)position.y - 0.5f ) < 0.02f );
+	ENSURE( b3AbsFloat( rotation.v.x ) < 0.001f );
+	ENSURE( b3AbsFloat( rotation.v.z ) < 0.001f );
+
+	b3Vec3 lower = { FLT_MAX, FLT_MAX, FLT_MAX };
+	b3Vec3 upper = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+
+	b3ContactData contacts[4];
+	int contactCount = b3Body_GetContactData( boxId, contacts, ARRAY_COUNT( contacts ) );
+	for ( int i = 0; i < contactCount; ++i )
+	{
+		bool boxIsA = B3_ID_EQUALS( contacts[i].shapeIdA, boxShapeId );
+		for ( int j = 0; j < contacts[i].manifoldCount; ++j )
+		{
+			const b3Manifold* manifold = contacts[i].manifolds + j;
+			for ( int k = 0; k < manifold->pointCount; ++k )
+			{
+				b3Vec3 anchor = boxIsA ? manifold->points[k].anchorA : manifold->points[k].anchorB;
+				lower = b3Min( lower, anchor );
+				upper = b3Max( upper, anchor );
+			}
+		}
+	}
+
+	// Anchors are relative to the box center of mass
+	ENSURE( lower.x < -2.5f && upper.x > 2.5f );
+	ENSURE( lower.z < -2.5f && upper.z > 2.5f );
+
+	b3DestroyWorld( worldId );
+	b3DestroyHeightField( hf );
+	return 0;
+}
+
 int HeightFieldTest( void )
 {
 	RUN_SUBTEST( HeightFieldCreate );
@@ -688,6 +754,7 @@ int HeightFieldTest( void )
 	RUN_SUBTEST( ShapeCastClockwiseWinding );
 	RUN_SUBTEST( RayCastBackside );
 	RUN_SUBTEST( RayCastClockwiseWinding );
+	RUN_SUBTEST( ManyTrianglesContact );
 
 	return 0;
 }
