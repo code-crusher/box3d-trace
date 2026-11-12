@@ -971,6 +971,37 @@ static int ShapeFlagsTest( void )
 	return 0;
 }
 
+// Applying wind to a sleeping body with wake enabled used to fetch the body sim before waking. Waking
+// frees the sleeping set's sims, so the subsequent transform read was a use-after-free. The body must
+// wake and actually receive the wind force.
+static int ShapeApplyWindSleepingBodyTest( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.gravity = b3Vec3_zero;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.isAwake = false;
+	b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+
+	b3BoxHull boxHull = b3MakeBoxHull( 0.25f, 0.25f, 0.25f );
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 1.0f;
+	b3ShapeId shapeId = b3CreateHullShape( bodyId, &shapeDef, &boxHull.base );
+
+	ENSURE( b3Body_IsAwake( bodyId ) == false );
+
+	b3Shape_ApplyWind( shapeId, (b3Vec3){ 20.0f, 0.0f, 0.0f }, 1.0f, 0.0f, 100.0f, true );
+	ENSURE( b3Body_IsAwake( bodyId ) );
+
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	ENSURE( b3Body_GetLinearVelocity( bodyId ).x > 0.0f );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
 int ShapeTest( void )
 {
 	box = b3MakeBoxHull( 1.0f, 1.0f, 1.0f );
@@ -979,6 +1010,7 @@ int ShapeTest( void )
 	RUN_SUBTEST( ShapeAABBTest );
 	RUN_SUBTEST( ShapeNameTest );
 	RUN_SUBTEST( ShapeFlagsTest );
+	RUN_SUBTEST( ShapeApplyWindSleepingBodyTest );
 	// RUN_SUBTEST( PointInShapeTest );
 	RUN_SUBTEST( RayCastShapeTest );
 

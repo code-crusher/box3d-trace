@@ -1925,16 +1925,16 @@ void b3Shape_ApplyWind( b3ShapeId shapeId, b3Vec3 wind, float drag, float lift, 
 		return;
 	}
 
-	b3BodySim* sim = b3GetBodySim( world, body );
-
 	if ( body->setIndex != b3_awakeSet )
 	{
-		// Must wake for state to exist
+		// Must wake for state to exist. Waking moves the body to the awake set and frees the sleeping
+		// set's body sims, so fetch the sim afterwards.
 		b3WakeBodyWithLock( world, body );
 	}
 
 	B3_ASSERT( body->setIndex == b3_awakeSet );
 
+	b3BodySim* sim = b3GetBodySim( world, body );
 	b3BodyState* state = b3GetBodyState( world, body );
 	// Only the rotation is used below, so the demoted world transform is exact
 	b3Transform transform = b3ToRelativeTransform( sim->transform, b3Pos_zero );
