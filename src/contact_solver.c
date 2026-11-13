@@ -278,6 +278,7 @@ void b3PrepareContacts_Mesh( b3SolverBlock block, b3StepContext* context )
 
 				{
 					constraint->rollingImpulse = b3MulSV( warmStartScale, manifold->rollingImpulse );
+					constraint->totalRollingImpulse = b3Vec3_zero;
 				}
 			}
 		}
@@ -619,6 +620,10 @@ void b3SolveContacts_Mesh( b3SolverBlock block, b3StepContext* context )
 					constraint->rollingImpulse = b3MulSV( maxImpulse / sqrtf( magSqr ), constraint->rollingImpulse );
 				}
 
+				// The solver reuses rollingImpulse as the warm-start seed, so the per-step report is
+				// accumulated separately here.
+				constraint->totalRollingImpulse = b3Add( constraint->totalRollingImpulse, constraint->rollingImpulse );
+
 				deltaImpulse = b3Sub( constraint->rollingImpulse, oldImpulse );
 
 				wA = b3Sub( wA, b3MulMV( iA, deltaImpulse ) );
@@ -878,6 +883,7 @@ void b3StoreImpulses_Mesh( b3SolverBlock block, b3StepContext* context, int work
 				manifold->frictionImpulse = b3Blend2( constraint->frictionImpulse.x, constraint->tangent1,
 													  constraint->frictionImpulse.y, constraint->tangent2 );
 				manifold->rollingImpulse = constraint->rollingImpulse;
+				manifold->totalRollingImpulse = constraint->totalRollingImpulse;
 
 				int count = constraint->pointCount;
 				B3_ASSERT( count == manifold->pointCount );

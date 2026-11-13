@@ -1797,6 +1797,208 @@ static int BodySimLocatorTest( void )
 	return LocatorFastFlagTest();
 }
 
+// Issue #73: the solver clamps each sub-step's rolling impulse against that sub-step's normal
+// impulse. Gravity's normal impulse lands in the early sub-steps, so the last sub-step clamps to
+// almost nothing and the reported rollingImpulse collapses toward zero under sub-stepping even
+// though the ball decelerates. totalRollingImpulse is the per-step sum and must be independent of
+// the sub-step count.
+typedef struct RollingReport
+{
+	float lastRollingImpulse;
+	float totalRollingImpulse;
+	float totalNormalImpulse;
+	float deceleration;
+} RollingReport;
+
+static RollingReport MeasureRollingReport( int subStepCount )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.gravity = (b3Vec3){ 0.0f, -10.0f, 0.0f };
+	worldDef.enableSleep = false;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+
+	b3ShapeDef groundShapeDef = b3DefaultShapeDef();
+	groundShapeDef.baseMaterial.friction = 0.6f;
+	b3BoxHull groundHull = b3MakeBoxHull( 20.0f, 0.5f, 20.0f );
+	b3CreateHullShape( groundId, &groundShapeDef, &groundHull.base );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.position = (b3Pos){ 0.0f, 1.0f, 0.0f };
+	b3BodyId ballId = b3CreateBody( worldId, &bodyDef );
+
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 1.0f;
+	shapeDef.baseMaterial.friction = 0.6f;
+	shapeDef.baseMaterial.rollingResistance = 0.1f;
+	b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, 0.5f };
+	b3CreateSphereShape( ballId, &shapeDef, &sphere );
+
+	// Steady rolling along +x: the spin about z matches the linear speed over the radius
+	float speed = 5.0f;
+	float radius = 0.5f;
+	b3Body_SetLinearVelocity( ballId, (b3Vec3){ speed, 0.0f, 0.0f } );
+	b3Body_SetAngularVelocity( ballId, (b3Vec3){ 0.0f, 0.0f, -speed / radius } );
+	float spinStart = b3Body_GetAngularVelocity( ballId ).z;
+
+	RollingReport report = { 0 };
+
+	// Long enough for the ball to settle into a steady roll, then sample the last step
+	int stepCount = 120;
+	for ( int i = 0; i < stepCount; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, subStepCount );
+
+		if ( i + 1 < stepCount )
+		{
+			continue;
+		}
+
+		b3ContactData contactData[4];
+		int contactCount = b3Body_GetContactData( ballId, contactData, ARRAY_COUNT( contactData ) );
+		for ( int c = 0; c < contactCount; ++c )
+		{
+			for ( int m = 0; m < contactData[c].manifoldCount; ++m )
+			{
+				const b3Manifold* manifold = contactData[c].manifolds + m;
+				report.lastRollingImpulse += b3Length( manifold->rollingImpulse );
+				report.totalRollingImpulse += b3Length( manifold->totalRollingImpulse );
+				for ( int p = 0; p < manifold->pointCount; ++p )
+				{
+					report.totalNormalImpulse += manifold->points[p].totalNormalImpulse;
+				}
+			}
+		}
+	}
+
+	float spinEnd = b3Body_GetAngularVelocity( ballId ).z;
+	report.deceleration = ( spinStart - spinEnd ) / spinStart;
+
+	b3DestroyWorld( worldId );
+	return report;
+}
+
+static int RollingImpulseSubStepReportTest( void )
+{
+	RollingReport single = MeasureRollingReport( 1 );
+	RollingReport multi = MeasureRollingReport( 4 );
+
+	printf( "    1 sub-step: last=%.6f total=%.6f normal=%.6f decel=%.4f\n", single.lastRollingImpulse,
+			single.totalRollingImpulse, single.totalNormalImpulse, single.deceleration );
+	printf( "    4 sub-steps: last=%.6f total=%.6f normal=%.6f decel=%.4f\n", multi.lastRollingImpulse,
+			multi.totalRollingImpulse, multi.totalNormalImpulse, multi.deceleration );
+
+	// The ball must actually be decelerating from rolling resistance
+	ENSURE( single.deceleration > 0.0f );
+	ENSURE( multi.deceleration > 0.0f );
+
+	// A single sub-step is unaffected: the per-step total is the final impulse
+	ENSURE( single.totalRollingImpulse > 0.0f );
+	ENSURE_SMALL( single.totalRollingImpulse - single.lastRollingImpulse, 1e-5f );
+
+	// Under sub-stepping the last sub-step's impulse collapses, but the reported total must not.
+	// This is the regression: before the fix totalRollingImpulse did not exist and the only
+	// reported value was the last sub-step's.
+	ENSURE( multi.lastRollingImpulse < 0.1f * single.lastRollingImpulse );
+	ENSURE( multi.totalRollingImpulse > 0.5f * single.totalRollingImpulse );
+
+	// The total is a per-step quantity, so it must be nearly independent of the sub-step count
+	ENSURE_SMALL( multi.totalRollingImpulse - single.totalRollingImpulse, 0.05f * single.totalRollingImpulse );
+
+	return 0;
+}
+
+// The overflow color uses the scalar solver (b3PrepareContacts_Mesh / b3SolveContacts_Mesh),
+// which has its own copy of the rolling resistance code. This scene puts more dyn-dyn contacts
+// on one hub than there are dynamic colors, so some land in overflow. Issue #73: the reported
+// total must survive sub-stepping there too.
+static int OverflowRollingImpulseReportTest( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.workerCount = 1;
+	worldDef.enableSleep = false;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	// No ground: the scene runs for a single step and every manifold on the hub must come from a
+	// neighbor with rolling resistance, so there is no zero-resistance contact to account for.
+	float hubHalfX = 0.5f, hubHalfY = 2.5f, hubHalfZ = 0.5f;
+	b3BodyId hubId;
+	{
+		b3BodyDef bodyDef = b3DefaultBodyDef();
+		bodyDef.type = b3_dynamicBody;
+		bodyDef.position = (b3Pos){ 0.0f, hubHalfY, 0.0f };
+		hubId = b3CreateBody( worldId, &bodyDef );
+		b3BoxHull box = b3MakeBoxHull( hubHalfX, hubHalfY, hubHalfZ );
+		b3ShapeDef shapeDef = b3DefaultShapeDef();
+		shapeDef.density = 50.0f;
+		b3CreateHullShape( hubId, &shapeDef, &box.base );
+	}
+
+	// 5 rings of 5 neighbors: 25 dyn-dyn contacts on the hub, more than the 20 dynamic colors.
+	float neighborHalf = 0.2f;
+	float ringRadius = hubHalfX + neighborHalf - 0.03f;
+	b3BoxHull neighborBox = b3MakeBoxHull( neighborHalf, neighborHalf, neighborHalf );
+	b3ShapeDef neighborShapeDef = b3DefaultShapeDef();
+	neighborShapeDef.baseMaterial.rollingResistance = 0.3f;
+
+	for ( int ring = 0; ring < 5; ++ring )
+	{
+		float y = neighborHalf + 0.05f + 0.5f * ring;
+		float thetaOffset = ( ring & 1 ) ? B3_PI / 5.0f : 0.0f;
+		for ( int slot = 0; slot < 5; ++slot )
+		{
+			float theta = thetaOffset + ( 2.0f * B3_PI * slot ) / 5.0f;
+			b3BodyDef bodyDef = b3DefaultBodyDef();
+			bodyDef.type = b3_dynamicBody;
+			bodyDef.position = (b3Pos){ ringRadius * cosf( theta ), y, ringRadius * sinf( theta ) };
+			b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+			b3CreateHullShape( bodyId, &neighborShapeDef, &neighborBox.base );
+
+			// Spin tangentially so the neighbors roll against the hub.
+			b3Body_SetAngularVelocity( bodyId, (b3Vec3){ -sinf( theta ) * 6.0f, 0.0f, cosf( theta ) * 6.0f } );
+		}
+	}
+
+	// One step is enough: all neighbors overlap the hub on the first step, so the overflow color
+	// is populated immediately and the rolling impulses are large.
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+
+	// Confirm the scene actually used the overflow color, otherwise this silently becomes a
+	// no-op if graph coloring changes.
+	b3Counters counters = b3World_GetCounters( worldId );
+	int overflowContacts = counters.colorCounts[B3_GRAPH_COLOR_COUNT - 1];
+	ENSURE( overflowContacts > 0 );
+
+	int manifoldCount = 0;
+	int nonzeroTotal = 0;
+	b3ContactData contactData[32];
+	int contactCount = b3Body_GetContactData( hubId, contactData, ARRAY_COUNT( contactData ) );
+	for ( int c = 0; c < contactCount; ++c )
+	{
+		for ( int m = 0; m < contactData[c].manifoldCount; ++m )
+		{
+			const b3Manifold* manifold = contactData[c].manifolds + m;
+			manifoldCount += 1;
+			if ( b3Length( manifold->totalRollingImpulse ) > 0.0f )
+			{
+				nonzeroTotal += 1;
+			}
+		}
+	}
+
+	b3DestroyWorld( worldId );
+
+	// Every hub manifold must report a per-step rolling impulse total. Without the accumulation
+	// in b3SolveContacts_Mesh only the manifolds that landed in the wide convex path report one.
+	ENSURE( manifoldCount > 0 );
+	ENSURE( nonzeroTotal == manifoldCount );
+
+	return 0;
+}
+
 int WorldTest( void )
 {
 	RUN_SUBTEST( HelloWorld );
@@ -1825,6 +2027,8 @@ int WorldTest( void )
 	RUN_SUBTEST( TestEnlargedProxyDestroyed );
 	RUN_SUBTEST( TestCompoundShapeCount );
 	RUN_SUBTEST( BodySimLocatorTest );
+	RUN_SUBTEST( RollingImpulseSubStepReportTest );
+	RUN_SUBTEST( OverflowRollingImpulseReportTest );
 
 	return 0;
 }

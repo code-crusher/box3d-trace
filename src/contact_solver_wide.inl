@@ -147,6 +147,10 @@ typedef struct B3_WIDE( b3ContactManifold )
 	b3SymMatrix2W tangentMass;
 	b3Vec2W frictionImpulse;
 	b3Vec3W rollingImpulse;
+
+	// Sum of the post-clamp rolling impulse over the sub-steps. Report-only and never warm-started.
+	b3Vec3W totalRollingImpulse;
+
 	b3FloatW rollingMask;
 	b3FloatW tangentVelocity1;
 	b3FloatW tangentVelocity2;
@@ -435,7 +439,8 @@ _Static_assert( offsetof( b3ManifoldPoint, normalImpulse ) == 28, "manifold poin
 _Static_assert( offsetof( b3Manifold, twistImpulse ) == offsetof( b3Manifold, normal ) + 12, "manifold layout" );
 _Static_assert( offsetof( b3Manifold, frictionImpulse ) == offsetof( b3Manifold, normal ) + 16, "manifold layout" );
 _Static_assert( offsetof( b3Manifold, rollingImpulse ) == offsetof( b3Manifold, normal ) + 28, "manifold layout" );
-_Static_assert( offsetof( b3Manifold, pointCount ) == offsetof( b3Manifold, normal ) + 40, "manifold layout" );
+_Static_assert( offsetof( b3Manifold, totalRollingImpulse ) == offsetof( b3Manifold, normal ) + 40, "manifold layout" );
+_Static_assert( offsetof( b3Manifold, pointCount ) == offsetof( b3Manifold, normal ) + 52, "manifold layout" );
 _Static_assert( offsetof( b3Matrix3, cy ) == 12 && offsetof( b3Matrix3, cz ) == 24 && sizeof( b3Matrix3 ) == 36,
 				"matrix layout" );
 
@@ -726,6 +731,9 @@ B3_FORCE_INLINE bool b3PrepareConstraintW( b3ContactConstraintWide* c, b3Contact
 		cm->rollingImpulse.X = b3BlendW( zeroW, b3MulW( warmStartScale, rollingImpulse.X ), cm->rollingMask );
 		cm->rollingImpulse.Y = b3BlendW( zeroW, b3MulW( warmStartScale, rollingImpulse.Y ), cm->rollingMask );
 		cm->rollingImpulse.Z = b3BlendW( zeroW, b3MulW( warmStartScale, rollingImpulse.Z ), cm->rollingMask );
+		cm->totalRollingImpulse.X = zeroW;
+		cm->totalRollingImpulse.Y = zeroW;
+		cm->totalRollingImpulse.Z = zeroW;
 		cm->frictionImpulse.x = b3MulW( warmStartScale, b3DotW( frictionImpulse, tangent1 ) );
 		cm->frictionImpulse.y = b3MulW( warmStartScale, b3DotW( frictionImpulse, tangent2 ) );
 
@@ -1297,6 +1305,12 @@ B3_FORCE_INLINE void b3SolveContactsW( b3SolverBlock block, b3StepContext* conte
 				cm->rollingImpulse.Y = b3BlendW( zeroW, scaledImpulse.Y, cm->rollingMask );
 				cm->rollingImpulse.Z = b3BlendW( zeroW, scaledImpulse.Z, cm->rollingMask );
 
+				// The solver reuses rollingImpulse as the warm-start seed, so the per-step report is
+				// accumulated separately here.
+				cm->totalRollingImpulse.X = b3AddW( cm->totalRollingImpulse.X, cm->rollingImpulse.X );
+				cm->totalRollingImpulse.Y = b3AddW( cm->totalRollingImpulse.Y, cm->rollingImpulse.Y );
+				cm->totalRollingImpulse.Z = b3AddW( cm->totalRollingImpulse.Z, cm->rollingImpulse.Z );
+
 				deltaImpulse = b3SubVW( cm->rollingImpulse, oldImpulse );
 
 				bA.w = b3MulSubMVW( bA.w, c->invIA, deltaImpulse );
@@ -1522,6 +1536,9 @@ B3_FORCE_INLINE void b3StoreImpulsesW( b3SolverBlock block, b3StepContext* conte
 				const float* rollingImpulseX = (const float*)&cm->rollingImpulse.X;
 				const float* rollingImpulseY = (const float*)&cm->rollingImpulse.Y;
 				const float* rollingImpulseZ = (const float*)&cm->rollingImpulse.Z;
+				const float* totalRollingImpulseX = (const float*)&cm->totalRollingImpulse.X;
+				const float* totalRollingImpulseY = (const float*)&cm->totalRollingImpulse.Y;
+				const float* totalRollingImpulseZ = (const float*)&cm->totalRollingImpulse.Z;
 
 				float f1 = frictionImpulse1[lane];
 				float f2 = frictionImpulse2[lane];
@@ -1535,6 +1552,11 @@ B3_FORCE_INLINE void b3StoreImpulsesW( b3SolverBlock block, b3StepContext* conte
 					rollingImpulseX[lane],
 					rollingImpulseY[lane],
 					rollingImpulseZ[lane],
+				};
+				m->totalRollingImpulse = (b3Vec3){
+					totalRollingImpulseX[lane],
+					totalRollingImpulseY[lane],
+					totalRollingImpulseZ[lane],
 				};
 
 				int pointCount = m->pointCount;

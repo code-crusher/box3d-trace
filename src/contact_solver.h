@@ -32,6 +32,10 @@ typedef struct b3ManifoldConstraint
 	b3Matrix2 tangentMass;
 	b3Vec2 frictionImpulse;
 	b3Vec3 rollingImpulse;
+
+	// Sum of the post-clamp rolling impulse over the sub-steps. Report-only and never warm-started.
+	b3Vec3 totalRollingImpulse;
+
 	float tangentVelocity1;
 	float tangentVelocity2;
 } b3ManifoldConstraint;

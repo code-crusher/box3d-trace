@@ -389,6 +389,10 @@ returned by the simulation. The `b3Manifold` struct contains:
   and feature ids
 - `pointCount`: 0–4 valid points
 - `frictionImpulse`, `twistImpulse`, `rollingImpulse`: accumulated friction state
+- `totalRollingImpulse`: the rolling impulse summed over all sub-steps. The solver
+  clamps each sub-step's rolling impulse against that sub-step's normal impulse, so
+  `rollingImpulse` alone can read near zero even while a body is decelerating. Use
+  `totalRollingImpulse` for reporting such as rolling audio.
 
 For direct use, the low-level collide functions produce a `b3LocalManifold` in
 the frame of shape A:

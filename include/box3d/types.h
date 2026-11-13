@@ -2815,8 +2815,15 @@ typedef struct b3Manifold
 	/// Central friction linear impulse
 	b3Vec3 frictionImpulse;
 
-	/// Rolling resistance angular impulse
+	/// Rolling resistance angular impulse. Since Box3D uses sub-stepping, this is the result
+	/// from the final sub-step. This is the value used for warm starting.
 	b3Vec3 rollingImpulse;
+
+	/// The total rolling resistance angular impulse applied across sub-stepping. Each sub-step
+	/// clamps the rolling impulse to the rolling resistance times that sub-step's normal impulse,
+	/// so the final sub-step alone may report almost nothing. This is the per-step sum and is
+	/// independent of the sub-step count. It is report-only and is not used for warm starting.
+	b3Vec3 totalRollingImpulse;
 
 	/// The number of contact points, will be 0 to 4
 	int pointCount;
