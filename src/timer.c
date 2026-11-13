@@ -245,11 +245,24 @@ void b3JoinThread( b3Thread* t )
 #include <sched.h>
 #include <time.h>
 
+#if defined( __EMSCRIPTEN__ )
+#include <emscripten/emscripten.h>
+#endif
+
 uint64_t b3GetTicks( void )
 {
+#if defined( __EMSCRIPTEN__ )
+	// clock_gettime routes through the WASI clock_time_get shim, which turns the
+	// timestamp into a JavaScript BigInt on every call. The profiler reads the
+	// clock dozens of times per step, so that garbage adds up. emscripten_get_now
+	// reads the same monotonic clock without leaving wasm, at millisecond
+	// resolution, which converts to the nanosecond ticks the API expects.
+	return (uint64_t)( emscripten_get_now() * 1000000.0 );
+#else
 	struct timespec ts;
 	clock_gettime( CLOCK_MONOTONIC, &ts );
 	return ts.tv_sec * 1000000000LL + ts.tv_nsec;
+#endif
 }
 
 float b3GetMilliseconds( uint64_t ticks )
