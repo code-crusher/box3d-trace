@@ -1900,6 +1900,133 @@ b3HullData* b3CreateCone( float height, float radius1, float radius2, int slices
 	return hull;
 }
 
+// A tapered capsule is a capsule whose two hemispherical caps have different radii. The caps
+// are connected by a conical frustum tangent to both spheres. The shape is parameterized by
+// the two cap centers and radii; the center line runs from center1 to center2. The resulting
+// convex hull is a valid b3HullData and can be used as a regular hull shape or baked into a
+// compound.
+//
+// The frustum is the tangent cone of the two spheres, i.e. the cone that is tangent to both
+// spheres along a circle each (the junction rings). This is the surface of revolution you get
+// by sweeping the common tangent of the two cap circles around the axis. Each junction ring
+// lies in its own plane perpendicular to the axis, and the cone side between the two rings is
+// a frustum whose side facets are planar (each facet is the quadrilateral between two
+// corresponding points on the two rings).
+//
+// In the plane through the axis, the tangent cone appears as the two tangent lines to the two
+// cap circles. Let d be the distance between centers. The cone half-angle alpha satisfies
+// sin(alpha) = |r2 - r1| / d and the cone apex lies on the axis on the side of the smaller
+// sphere, at distance L_k = r_k * d / |r2 - r1| from each center k. A junction ring on sphere
+// k is the circle on the sphere whose plane cuts the axis at an offset r_k^2 / L_k from
+// center k toward the apex and whose radius is r_k * cos(alpha).
+b3HullData* b3CreateTaperedCapsule( b3Vec3 center1, float radius1, b3Vec3 center2, float radius2, int sides, int segments )
+{
+	B3_ASSERT( radius1 > 0.0f );
+	B3_ASSERT( radius2 > 0.0f );
+	B3_ASSERT( 3 <= sides && sides <= 32 );
+	B3_ASSERT( 2 <= segments && segments <= 32 );
+
+	b3Vec3 axis = b3Sub( center2, center1 );
+	float length = b3Length( axis );
+	B3_ASSERT( length > 0.0f );
+
+	b3Vec3 n = b3MulSV( 1.0f / length, axis );
+	float deltaRadius = radius2 - radius1;
+
+	// A tangent cone to both spheres exists iff |r2 - r1| < d.
+	if ( b3AbsFloat( deltaRadius ) >= length )
+	{
+		// One sphere fully swallows the other, there is no frustum. The enclosing sphere is the
+		// whole shape.
+		float bigRadius = radius2 > radius1 ? radius2 : radius1;
+		return b3CreateRock( bigRadius );
+	}
+
+	float cosAlpha = sqrtf( b3MaxFloat( 0.0f, length * length - deltaRadius * deltaRadius ) ) / length;
+
+	// The cone apex sits on the axis on the side of the smaller sphere, at signed coordinate
+	// zApex = -r1 * d / (r2 - r1) measured from center1 along n. Each junction ring lies on its
+	// sphere in a plane perpendicular to the axis, offset from the sphere center toward the apex
+	// by r_k^2 / L_k where L_k is the apex-to-center distance. For equal radii the apex is at
+	// infinity and the rings are the sphere equators.
+	b3Vec3 ringCenter1, ringCenter2;
+	float ringRadius1, ringRadius2;
+
+	if ( deltaRadius == 0.0f )
+	{
+		ringCenter1 = center1;
+		ringCenter2 = center2;
+		ringRadius1 = radius1;
+		ringRadius2 = radius2;
+	}
+	else
+	{
+		float zApex = -radius1 * length / deltaRadius;
+		float apexToCenter1 = b3AbsFloat( zApex );
+		float apexToCenter2 = b3AbsFloat( zApex - length );
+
+		// Direction from each sphere center toward the apex along the axis.
+		float dir1 = zApex < 0.0f ? -1.0f : 1.0f;
+		float dir2 = zApex - length < 0.0f ? -1.0f : 1.0f;
+
+		ringCenter1 = b3MulAdd( center1, dir1 * radius1 * radius1 / apexToCenter1, n );
+		ringCenter2 = b3MulAdd( center2, dir2 * radius2 * radius2 / apexToCenter2, n );
+		ringRadius1 = radius1 * cosAlpha;
+		ringRadius2 = radius2 * cosAlpha;
+	}
+
+	// The two cap domes are the parts of each sphere that face away from the other sphere, so
+	// their poles are the outer poles of each sphere along the axis.
+	b3Vec3 pole1 = b3MulAdd( center1, -radius1, n );
+	b3Vec3 pole2 = b3MulAdd( center2, radius2, n );
+
+	// Build a local frame: u and v span the ring planes, n is the axis.
+	b3Vec3 u = b3Normalize( b3Cross( n, b3Perp( n ) ) );
+	b3Vec3 v = b3Cross( n, u );
+
+	// Sample the two junction rings plus the segment runs between them. The intermediate rings
+	// interpolate linearly between the two junction rings, which is a convex combination inside
+	// the frustum (the frustum is convex).
+	int pointCount = ( segments + 1 ) * sides;
+	b3Vec3* points = (b3Vec3*)b3Alloc( pointCount * sizeof( b3Vec3 ) );
+	B3_ASSERT( points != NULL );
+
+	float deltaTheta = 2.0f * B3_PI / (float)sides;
+	b3Vec3* write = points;
+	for ( int seg = 0; seg <= segments; ++seg )
+	{
+		float t = (float)seg / (float)segments;
+		b3Vec3 ringCenter = b3Lerp( ringCenter1, ringCenter2, t );
+		float ringRadius = b3LerpFloat( ringRadius1, ringRadius2, t );
+
+		for ( int index = 0; index < sides; ++index )
+		{
+			float theta = (float)index * deltaTheta;
+			float cosTheta = b3Cos( theta );
+			float sinTheta = b3Sin( theta );
+
+			b3Vec3 radial = b3MulAdd( b3MulSV( cosTheta, u ), sinTheta, v );
+			*write = b3MulAdd( ringCenter, ringRadius, radial );
+			write += 1;
+		}
+	}
+
+	// Close the shape with one sample at each cap sphere's pole, the point on the sphere
+	// furthest along the axis from the cone apex. The hull of a ring plus a pole point is a
+	// pyramid over the ring, which approximates the cap dome.
+	b3Vec3* pointsWithPoles = (b3Vec3*)b3Alloc( ( pointCount + 2 ) * sizeof( b3Vec3 ) );
+	B3_ASSERT( pointsWithPoles != NULL );
+	memcpy( pointsWithPoles, points, pointCount * sizeof( b3Vec3 ) );
+	pointsWithPoles[pointCount + 0] = pole1;
+	pointsWithPoles[pointCount + 1] = pole2;
+	b3Free( points, pointCount * sizeof( b3Vec3 ) );
+
+	b3HullData* hull = b3CreateHull( pointsWithPoles, pointCount + 2, pointCount + 2 );
+	b3Free( pointsWithPoles, ( pointCount + 2 ) * sizeof( b3Vec3 ) );
+
+	return hull;
+}
+
 b3HullData* b3CreateRock( float radius )
 {
 	int pointCount = 10;

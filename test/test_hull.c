@@ -3,6 +3,7 @@
 
 #include "test_macros.h"
 
+#include "hull.h"
 #include "box3d/collision.h"
 #include "box3d/constants.h"
 #include "box3d/math_functions.h"
@@ -741,6 +742,77 @@ static int Hull2DOrderTest( void )
 	return 0;
 }
 
+static int CreateHullTaperedCapsuleTest( void )
+{
+	// Asymmetric case: small cap at origin, large cap at z = d.
+	const float d = 2.0f;
+	const float radius1 = 0.5f;
+	const float radius2 = 1.0f;
+	const int sides = 8;
+	const int segments = 4;
+
+	b3Vec3 center1 = { 0.0f, 0.0f, 0.0f };
+	b3Vec3 center2 = { 0.0f, 0.0f, d };
+
+	b3HullData* hull = b3CreateTaperedCapsule( center1, radius1, center2, radius2, sides, segments );
+	ENSURE( hull != NULL );
+	ENSURE( b3IsValidHull( hull ) );
+
+	// Euler identity for a convex polyhedron.
+	ENSURE( hull->vertexCount - hull->edgeCount / 2 + hull->faceCount == 2 );
+
+	// The two cap domes are pyramids over the junction rings and the frustum side is planar
+	// facets, so every sample point plus the two poles survives. Count the expected vertices:
+	// 2 poles + the two junction rings (2 * sides) + the intermediate rings.
+	ENSURE( hull->vertexCount == 2 + ( segments + 1 ) * sides );
+
+	// AABB must span the outer poles along the axis and the maximum ring radius in the plane.
+	// The ring radius is r * cos(alpha) with sin(alpha) = |r2 - r1| / d, so the widest ring is
+	// radius2 * cos(alpha).
+	b3AABB aabb = hull->aabb;
+	ENSURE_SMALL( aabb.lowerBound.z + radius1, 1e-4f );
+	ENSURE_SMALL( aabb.upperBound.z - ( d + radius2 ), 1e-4f );
+
+	float cosAlpha = sqrtf( d * d - ( radius2 - radius1 ) * ( radius2 - radius1 ) ) / d;
+	float maxPlaneRadius = radius2 * cosAlpha;
+	ENSURE_SMALL( aabb.lowerBound.x + maxPlaneRadius, 1e-4f );
+	ENSURE_SMALL( aabb.upperBound.x - maxPlaneRadius, 1e-4f );
+	ENSURE_SMALL( aabb.lowerBound.y + maxPlaneRadius, 1e-4f );
+	ENSURE_SMALL( aabb.upperBound.y - maxPlaneRadius, 1e-4f );
+
+	// Every vertex must lie inside the AABB of the shape.
+	const b3Vec3* points = b3GetHullPoints( hull );
+	for ( int i = 0; i < hull->vertexCount; ++i )
+	{
+		ENSURE( aabb.lowerBound.x - 1e-3f <= points[i].x && points[i].x <= aabb.upperBound.x + 1e-3f );
+		ENSURE( aabb.lowerBound.y - 1e-3f <= points[i].y && points[i].y <= aabb.upperBound.y + 1e-3f );
+		ENSURE( aabb.lowerBound.z - 1e-3f <= points[i].z && points[i].z <= aabb.upperBound.z + 1e-3f );
+	}
+
+	b3DestroyHull( hull );
+
+	// Degenerate: one sphere fully contains the other. The result is a rock hull of the larger
+	// radius.
+	b3HullData* degenerate = b3CreateTaperedCapsule( center1, 3.0f, center2, 1.0f, sides, segments );
+	ENSURE( degenerate != NULL );
+	ENSURE( b3IsValidHull( degenerate ) );
+	ENSURE_SMALL( degenerate->aabb.upperBound.x - 3.0f, 1e-4f );
+	ENSURE_SMALL( degenerate->aabb.upperBound.z - 3.0f, 1e-4f );
+	b3DestroyHull( degenerate );
+
+	// Regular capsule: equal radii. The rings are the sphere equators and the domes are the two
+	// outer hemispheres.
+	b3HullData* regular = b3CreateTaperedCapsule( center1, radius1, center2, radius1, sides, segments );
+	ENSURE( regular != NULL );
+	ENSURE( b3IsValidHull( regular ) );
+	ENSURE_SMALL( regular->aabb.lowerBound.z + radius1, 1e-4f );
+	ENSURE_SMALL( regular->aabb.upperBound.z - ( d + radius1 ), 1e-4f );
+	ENSURE_SMALL( regular->aabb.upperBound.x - radius1, 1e-4f );
+	b3DestroyHull( regular );
+
+	return 0;
+}
+
 int HullTest( void )
 {
 	RUN_SUBTEST( CreateHullCubeTest );
@@ -750,6 +822,7 @@ int HullTest( void )
 	RUN_SUBTEST( CreateHullRedundantInputTest );
 	RUN_SUBTEST( CreateHullCloneTest );
 	RUN_SUBTEST( CreateHullCylinderTest );
+	RUN_SUBTEST( CreateHullTaperedCapsuleTest );
 	RUN_SUBTEST( CreateHullSphereReductionTest );
 	RUN_SUBTEST( CreateHullSphereStressTest );
 	RUN_SUBTEST( CreateHullMergeChurnStressTest );

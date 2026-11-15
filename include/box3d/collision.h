@@ -229,6 +229,15 @@ B3_API b3HullData* b3CreateCylinder( float height, float radius, float yOffset, 
 /// Create a tessellated cone as a hull.
 B3_API b3HullData* b3CreateCone( float height, float radius1, float radius2, int slices );
 
+/// Create a tapered capsule as a hull: a capsule whose two hemispherical caps have different
+/// radii, connected by a conical frustum tangent to both spheres. The centers of the two caps
+/// are center1 and center2 with radii radius1 and radius2. The side and each cap dome are
+/// tessellated with `sides` segments around the axis; the frustum is split into `segments`
+/// rings. Returns NULL if the hull builder fails. If one sphere fully contains the other, the
+/// degenerate shape reduces to a rock hull of the larger radius.
+B3_API b3HullData* b3CreateTaperedCapsule( b3Vec3 center1, float radius1, b3Vec3 center2, float radius2, int sides,
+										   int segments );
+
 /// Create a rock shaped hull.
 B3_API b3HullData* b3CreateRock( float radius );
 

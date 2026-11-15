@@ -17,6 +17,7 @@ static inline int b3GetHullSoaStride( int count )
 
 uint64_t b3HashHullData( const b3HullData* hull );
 bool b3CompareHullData( const b3HullData* hull1, const b3HullData* hull2 );
+bool b3IsValidHull( const b3HullData* hull );
 
 // Map keyed by hull content. The world hull database uses the value as a reference count,
 // while compound baking stores uses the value as a byte offset. Implementation is in hull.c.
