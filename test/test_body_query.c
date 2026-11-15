@@ -767,6 +767,32 @@ static int MoverTOIKeepsHitAfterMiss( void )
 	return 0;
 }
 
+// A miss reports a fraction of 1 and never touches the result point or normal. Callers must gate
+// on fraction < 1, not fraction > 0, or the step after a real hit would overwrite the impact
+// with the zeroed miss result.
+static int MoverTOIMissKeepsGarbageOut( void )
+{
+	b3BodyId bodyId;
+	b3WorldId worldId = CreateQueryWorld( &bodyId );
+
+	b3BoxHull box = b3MakeBoxHull( 0.5f, 0.5f, 0.5f );
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3CreateHullShape( bodyId, &shapeDef, &box.base );
+
+	// Sweeping along +Y holds the X gap at 4.25 for the whole interval, so no shape is ever hit.
+	b3Capsule mover = MakeStandingMover();
+	b3WorldTransform bodyTransform = IdentityAt( 5.0f, 0.0f, 0.0f );
+	b3BodyTOIResult result = b3Body_TimeOfImpactMover( bodyId, b3Pos_zero, &mover, (b3Vec3){ 0.0f, 10.0f, 0.0f },
+													  b3DefaultQueryFilter(), bodyTransform, bodyTransform );
+
+	ENSURE_SMALL( result.fraction - 1.0f, 1e-6f );
+	ENSURE( B3_IS_NULL( result.shapeId ) );
+	ENSURE( b3IsNormalized( result.normal ) == false );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
 // The mover capsule points live in the query frame, so sliding both the mover and the body by
 // the same offset must not move the impact.
 static int MoverTOIMoverOffset( void )
@@ -1056,6 +1082,7 @@ int BodyQueryTest( void )
 	RUN_SUBTEST( MoverTOIOverlapped );
 	RUN_SUBTEST( MoverTOIClosestShape );
 	RUN_SUBTEST( MoverTOIKeepsHitAfterMiss );
+	RUN_SUBTEST( MoverTOIMissKeepsGarbageOut );
 	RUN_SUBTEST( MoverTOIMoverOffset );
 	RUN_SUBTEST( MoverTOIRotatingBody );
 	RUN_SUBTEST( MoverTOIFarFromOrigin );

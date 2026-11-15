@@ -852,6 +852,7 @@ B3_API int b3Body_CollideMover( b3BodyId bodyId, b3BodyPlaneResult* bodyPlanes, 
 /// Perform a time of impact between a character mover and a body using specified sweep transforms.
 /// Initial overlap of any shape on the body is ignored. A non-overlapped shape can still be hit.
 /// Only considers convex shapes on the body.
+/// A miss (or an ignored initial overlap) returns a fraction of 1 with an invalid shape id.
 B3_API b3BodyTOIResult b3Body_TimeOfImpactMover( b3BodyId bodyId, b3Pos origin,
 												 const b3Capsule* mover, b3Vec3 moverTranslation,
 												 b3QueryFilter filter,

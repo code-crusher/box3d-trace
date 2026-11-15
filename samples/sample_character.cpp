@@ -714,7 +714,10 @@ public:
 			b3Body_TimeOfImpactMover( m_treeId, moverStart, &m_mover.m_capsule, moverTranslation,
 									  b3DefaultQueryFilter(), treeStart, treeEnd );
 
-		if ( toi.fraction > 0.0f )
+		// A full sweep with no hit leaves fraction at 1, so only a real impact inside the sweep
+		// updates the marker. Otherwise the step after a hit would overwrite it with the zeroed
+		// miss result.
+		if ( toi.fraction < 1.0f )
 		{
 			m_treeImpact = MakeImpact( m_treeId, &toi );
 		}
@@ -737,9 +740,10 @@ public:
 			b3Body_TimeOfImpactMover( m_fallingBoxId, moverStart, &m_mover.m_capsule,
 									  moverTranslation, b3DefaultQueryFilter(), boxStart, boxEnd );
 
-		// A zero fraction means the box was already resting against the mover, so keep the pose
-		// from the step that first reached it.
-		if ( toi.fraction > 0.0f )
+		// A full sweep with no hit leaves fraction at 1, so only a real impact inside the sweep
+		// updates the pose and marker. Otherwise the step after a hit would overwrite the
+		// first-touch pose with the current pose and the marker with the zeroed miss result.
+		if ( toi.fraction < 1.0f )
 		{
 			m_impactTransform.p = boxStart.p + toi.fraction * b3SubPos( boxEnd.p, boxStart.p );
 			m_impactTransform.q = b3NLerp( boxStart.q, boxEnd.q, toi.fraction );
