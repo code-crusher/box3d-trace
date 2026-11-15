@@ -1056,7 +1056,11 @@ static void b3DestroyShapeAllocationForShapeChange( b3World* world, b3Shape* sha
 
 	if ( shape->userShape != NULL )
 	{
-		world->destroyDebugShape( shape->userShape, world->userDebugShapeContext );
+		// destroyDebugShape may be NULL after b3World_SetDebugShapeCallbacks disables the callbacks.
+		if ( world->destroyDebugShape != NULL )
+		{
+			world->destroyDebugShape( shape->userShape, world->userDebugShapeContext );
+		}
 		shape->userShape = NULL;
 	}
 }

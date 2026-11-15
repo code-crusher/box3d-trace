@@ -2293,6 +2293,40 @@ void b3World_SetRestitutionCallback( b3WorldId worldId, b3RestitutionCallback* c
 	world->restitutionCallback = callback != NULL ? callback : b3DefaultRestitutionCallback;
 }
 
+void b3World_SetDebugShapeCallbacks( b3WorldId worldId, b3CreateDebugShapeCallback* createDebugShape,
+									 b3DestroyDebugShapeCallback* destroyDebugShape,
+									 void* userDebugShapeContext )
+{
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		return;
+	}
+
+	// Release any debug shapes created through the previous callbacks. New callbacks may address
+	// memory that no longer exists (e.g. after a DLL reload), so any surviving user shapes must be
+	// torn down before the wiring changes.
+	b3DestroyDebugShapeCallback* oldDestroy = world->destroyDebugShape;
+	void* oldContext = world->userDebugShapeContext;
+	if ( oldDestroy != NULL )
+	{
+		int shapeCapacity = world->shapes.count;
+		for ( int i = 0; i < shapeCapacity; ++i )
+		{
+			b3Shape* shape = world->shapes.data + i;
+			if ( shape->id != B3_NULL_INDEX && shape->userShape != NULL )
+			{
+				oldDestroy( shape->userShape, oldContext );
+				shape->userShape = NULL;
+			}
+		}
+	}
+
+	world->createDebugShape = createDebugShape;
+	world->destroyDebugShape = destroyDebugShape;
+	world->userDebugShapeContext = userDebugShapeContext;
+}
+
 void b3World_SetWorkerCount( b3WorldId worldId, int count )
 {
 	b3World* world = b3GetUnlockedWorldFromId( worldId );

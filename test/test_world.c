@@ -341,6 +341,96 @@ int TestWorldCoverage( void )
 	return 0;
 }
 
+typedef struct DebugShapeCounters
+{
+	int created;
+	int destroyed;
+} DebugShapeCounters;
+
+static void* WorldTestCreateDebugShape( const b3DebugShape* debugShape, void* userContext )
+{
+	(void)debugShape;
+	DebugShapeCounters* counters = (DebugShapeCounters*)userContext;
+	counters->created += 1;
+	return userContext;
+}
+
+static void WorldTestDestroyDebugShape( void* userShape, void* userContext )
+{
+	(void)userShape;
+	DebugShapeCounters* counters = (DebugShapeCounters*)userContext;
+	counters->destroyed += 1;
+}
+
+static void WorldTestDrawShape( void* userShape, b3WorldTransform transform, b3HexColor color,
+								void* context )
+{
+	(void)userShape;
+	(void)transform;
+	(void)color;
+	(void)context;
+}
+
+static void WorldTestDrawWorld( b3WorldId worldId )
+{
+	b3DebugDraw draw = b3DefaultDebugDraw();
+	draw.DrawShapeFcn = WorldTestDrawShape;
+	draw.drawShapes = true;
+	float big = 1.0e6f;
+	draw.drawingBounds = (b3AABB){ { -big, -big, -big }, { big, big, big } };
+	b3World_Draw( worldId, &draw, B3_DEFAULT_MASK_BITS );
+}
+
+// The debug shape callbacks used to be fixed at world creation, so a world could not outlive the
+// addresses it was created with (e.g. a hot-reloaded DLL). Verify b3World_SetDebugShapeCallbacks
+// re-wires a live world, releases shapes owned by the previous callbacks, and lazily recreates
+// them through the new callbacks on the next draw.
+static int SetDebugShapeCallbacks( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+	b3BoxHull groundBox = b3MakeBoxHull( 10.0f, 1.0f, 10.0f );
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3CreateHullShape( groundId, &shapeDef, &groundBox.base );
+
+	// Wire callbacks into the live world after creation.
+	DebugShapeCounters first = { 0, 0 };
+	b3World_SetDebugShapeCallbacks( worldId, WorldTestCreateDebugShape, WorldTestDestroyDebugShape,
+									&first );
+
+	// Lazy creation fires once for the ground shape.
+	WorldTestDrawWorld( worldId );
+	ENSURE( first.created == 1 );
+	ENSURE( first.destroyed == 0 );
+
+	// Re-wiring must destroy the live shape with the old callbacks before swapping.
+	DebugShapeCounters second = { 0, 0 };
+	b3World_SetDebugShapeCallbacks( worldId, WorldTestCreateDebugShape, WorldTestDestroyDebugShape,
+									&second );
+	ENSURE( first.destroyed == 1 );
+	ENSURE( second.created == 0 );
+
+	// The next draw recreates the shape through the new callbacks.
+	WorldTestDrawWorld( worldId );
+	ENSURE( second.created == 1 );
+	ENSURE( second.destroyed == 0 );
+
+	// Disabling the callbacks (NULL) releases the live shape with the previous destroy callback.
+	b3World_SetDebugShapeCallbacks( worldId, NULL, NULL, NULL );
+	ENSURE( second.destroyed == 1 );
+
+	// A draw with callbacks disabled must not create anything or crash.
+	WorldTestDrawWorld( worldId );
+	ENSURE( second.created == 1 );
+	ENSURE( second.destroyed == 1 );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
 static int TestSensor( void )
 {
 	b3WorldDef worldDef = b3DefaultWorldDef();
@@ -1805,6 +1895,7 @@ int WorldTest( void )
 	RUN_SUBTEST( TestIsValid );
 	RUN_SUBTEST( TestWorldRecycle );
 	RUN_SUBTEST( TestWorldCoverage );
+	RUN_SUBTEST( SetDebugShapeCallbacks );
 	RUN_SUBTEST( TestExplosion );
 	RUN_SUBTEST( TestSensor );
 	RUN_SUBTEST( TestContinuousMoveEvent );

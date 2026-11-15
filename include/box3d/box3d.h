@@ -270,6 +270,15 @@ B3_API void b3World_SetFrictionCallback( b3WorldId worldId, b3FrictionCallback* 
 /// Set the restitution callback. Passing NULL resets to default.
 B3_API void b3World_SetRestitutionCallback( b3WorldId worldId, b3RestitutionCallback* callback );
 
+/// Re-set the debug shape callbacks after world creation. This allows the world to outlive the
+/// addresses set in b3WorldDef, for example when the host is reloaded (e.g. a hot-reloaded DLL).
+/// Passing NULL disables the callbacks. Live debug shapes owned by the previous callbacks are
+/// destroyed via the previous destroyDebugShape (if set), so swapping callbacks is balanced.
+/// @see b3WorldDef::createDebugShape, b3WorldDef::destroyDebugShape
+B3_API void b3World_SetDebugShapeCallbacks( b3WorldId worldId, b3CreateDebugShapeCallback* createDebugShape,
+											 b3DestroyDebugShapeCallback* destroyDebugShape,
+											 void* userDebugShapeContext );
+
 /// Set the worker count. Must be in the range [1, B3_MAX_WORKERS]
 B3_API void b3World_SetWorkerCount( b3WorldId worldId, int count );
 
