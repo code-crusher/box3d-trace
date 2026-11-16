@@ -30,6 +30,7 @@ extern int BitTest( void );
 extern int BodyTest( void );
 extern int BodyQueryTest( void );
 extern int BroadPhaseTest( void );
+extern int CcdLayoutTest( void );
 extern int CollisionTest( void );
 extern int CompoundTest( void );
 extern int ContainerTest( void );
@@ -108,6 +109,7 @@ int main( int argc, char** argv )
 	MAYBE_RUN_TEST( BodyTest );
 	MAYBE_RUN_TEST( BodyQueryTest );
 	MAYBE_RUN_TEST( BroadPhaseTest );
+	MAYBE_RUN_TEST( CcdLayoutTest );
 	MAYBE_RUN_TEST( CollisionTest );
 	MAYBE_RUN_TEST( CompoundTest );
 	MAYBE_RUN_TEST( ContainerTest );

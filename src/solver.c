@@ -17,6 +17,7 @@
 #include "parallel_for.h"
 #include "physics_world.h"
 #include "platform.h"
+#include "qsort.h"
 #include "sensor.h"
 #include "shape.h"
 #include "solver_set.h"
@@ -327,12 +328,18 @@ typedef struct b3ContinuousContext
 	float sensorFractions[B2_MAX_CONTINUOUS_SENSOR_HITS];
 	int sensorCount;
 
+	// Candidate shapes collected from the tree query, evaluated in ascending shape id order
+	// so the time of impact and its side effects do not depend on tree visit order.
+	b3Array( int ) shapeIds;
+
 	int distanceIterations;
 	int pushBackIterations;
 	int rootIterations;
 } b3ContinuousContext;
 
-// This is called from b3DynamicTree_Query for continuous collision
+// This is called from b3DynamicTree_Query for continuous collision. It only collects the
+// candidate shape ids; the candidates are evaluated in ascending shape id order after the
+// query returns so the time of impact does not depend on tree visit order.
 static bool b3ContinuousQueryCallback( int proxyId, uint64_t userData, void* context )
 {
 	B3_UNUSED( proxyId );
@@ -376,7 +383,6 @@ static bool b3ContinuousQueryCallback( int proxyId, uint64_t userData, void* con
 
 	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
 
-	b3BodySim* bodySim = b3GetBodySim( world, body );
 	B3_ASSERT( body->type == b3_staticBody || ( fastBodySim->flags & b3_isBullet ) );
 
 	// Skip bullets
@@ -409,52 +415,96 @@ static bool b3ContinuousQueryCallback( int proxyId, uint64_t userData, void* con
 		}
 	}
 
-	// todo does having a sweep on shapeA help with bullets?
-	b3Sweep sweepA = b3MakeRelativeSweep( bodySim, continuousContext->base );
-
-	// Time of impact versus shape. Supports all shape types
-	b3TOIOutput output = b3ShapeTimeOfImpact( shape, fastShape, &sweepA, &continuousContext->sweep, continuousContext->fraction );
-	if ( isSensor )
-	{
-		// Only accept a sensor hit that is sooner than the current solid hit.
-		if ( output.fraction <= continuousContext->fraction && continuousContext->sensorCount < B2_MAX_CONTINUOUS_SENSOR_HITS )
-		{
-			int index = continuousContext->sensorCount;
-
-			// The hit shape is a sensor
-			b3SensorHit sensorHit = {
-				.sensorId = shape->id,
-				.visitorId = fastShape->id,
-			};
-
-			continuousContext->sensorHits[index] = sensorHit;
-			continuousContext->sensorFractions[index] = output.fraction;
-			continuousContext->sensorCount += 1;
-		}
-	}
-	else if ( 0.0f < output.fraction && output.fraction < continuousContext->fraction )
-	{
-		bool didHit = true;
-
-		if ( didHit && ( ( shape->flags & b3_enablePreSolveEvents ) || ( fastShape->flags & b3_enablePreSolveEvents ) ) )
-		{
-			b3ShapeId shapeIdA = { shape->id + 1, world->worldId, shape->generation };
-			b3ShapeId shapeIdB = { fastShape->id + 1, world->worldId, fastShape->generation };
-			b3Pos point = b3OffsetPos( continuousContext->base, output.point );
-			didHit = world->preSolveFcn( shapeIdA, shapeIdB, point, output.normal, world->preSolveContext );
-		}
-
-		if ( didHit )
-		{
-			continuousContext->fraction = output.fraction;
-			continuousContext->distanceIterations = b3MaxInt( continuousContext->distanceIterations, output.distanceIterations );
-			continuousContext->pushBackIterations = b3MaxInt( continuousContext->pushBackIterations, output.pushBackIterations );
-			continuousContext->rootIterations = b3MaxInt( continuousContext->rootIterations, output.rootIterations );
-		}
-	}
+	b3Array_Push( continuousContext->shapeIds, shapeId );
 
 	// Continue query
 	return true;
+}
+
+// Evaluate the collected candidates in ascending shape id order. This is the order the tree
+// would deliver them if it were ordered by shape id, so the running time of impact, the
+// iteration counters, the pre-solve callbacks, and the kept sensor hits are all independent
+// of tree visit order.
+static void b3EvaluateContinuousCandidates( b3ContinuousContext* continuousContext )
+{
+	b3Array( int )* shapeIds = &continuousContext->shapeIds;
+	int count = shapeIds->count;
+	int* ids = shapeIds->data;
+
+	if ( count > 1 )
+	{
+#define LESS( i, j ) ( ids[(int)( i )] < ids[(int)( j )] )
+#define SWAP( i, j )                                                                                                             \
+	do                                                                                                                           \
+	{                                                                                                                            \
+		int tmp_ = ids[(int)( i )];                                                                                              \
+		ids[(int)( i )] = ids[(int)( j )];                                                                                       \
+		ids[(int)( j )] = tmp_;                                                                                                 \
+	}                                                                                                                            \
+	while ( 0 )
+
+		QSORT( count, LESS, SWAP );
+
+#undef LESS
+#undef SWAP
+	}
+
+	b3World* world = continuousContext->world;
+	b3Shape* fastShape = continuousContext->fastShape;
+
+	for ( int i = 0; i < count; ++i )
+	{
+		int shapeId = ids[i];
+		b3Shape* shape = b3Array_Get( world->shapes, shapeId );
+
+		b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
+		b3BodySim* bodySim = b3GetBodySim( world, body );
+
+		// todo does having a sweep on shapeA help with bullets?
+		b3Sweep sweepA = b3MakeRelativeSweep( bodySim, continuousContext->base );
+
+		// Time of impact versus shape. Supports all shape types
+		b3TOIOutput output =
+			b3ShapeTimeOfImpact( shape, fastShape, &sweepA, &continuousContext->sweep, continuousContext->fraction );
+		if ( shape->sensorIndex != B3_NULL_INDEX )
+		{
+			// Only accept a sensor hit that is sooner than the current solid hit.
+			if ( output.fraction <= continuousContext->fraction && continuousContext->sensorCount < B2_MAX_CONTINUOUS_SENSOR_HITS )
+			{
+				int index = continuousContext->sensorCount;
+
+				// The hit shape is a sensor
+				b3SensorHit sensorHit = {
+					.sensorId = shape->id,
+					.visitorId = fastShape->id,
+				};
+
+				continuousContext->sensorHits[index] = sensorHit;
+				continuousContext->sensorFractions[index] = output.fraction;
+				continuousContext->sensorCount += 1;
+			}
+		}
+		else if ( 0.0f < output.fraction && output.fraction < continuousContext->fraction )
+		{
+			bool didHit = true;
+
+			if ( didHit && ( ( shape->flags & b3_enablePreSolveEvents ) || ( fastShape->flags & b3_enablePreSolveEvents ) ) )
+			{
+				b3ShapeId shapeIdA = { shape->id + 1, world->worldId, shape->generation };
+				b3ShapeId shapeIdB = { fastShape->id + 1, world->worldId, fastShape->generation };
+				b3Pos point = b3OffsetPos( continuousContext->base, output.point );
+				didHit = world->preSolveFcn( shapeIdA, shapeIdB, point, output.normal, world->preSolveContext );
+			}
+
+			if ( didHit )
+			{
+				continuousContext->fraction = output.fraction;
+				continuousContext->distanceIterations = b3MaxInt( continuousContext->distanceIterations, output.distanceIterations );
+				continuousContext->pushBackIterations = b3MaxInt( continuousContext->pushBackIterations, output.pushBackIterations );
+				continuousContext->rootIterations = b3MaxInt( continuousContext->rootIterations, output.rootIterations );
+			}
+		}
+	}
 }
 
 static bool b3IsShapeFast( const b3Shape* shape, b3Vec3 centroid1, b3Vec3 centroid2, float rotationChord, float safetyFactor )
@@ -570,6 +620,9 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 			b3DynamicTree_Query( kinematicTree, sweptBox, B3_DEFAULT_MASK_BITS, false, b3ContinuousQueryCallback, &context );
 			b3DynamicTree_Query( dynamicTree, sweptBox, B3_DEFAULT_MASK_BITS, false, b3ContinuousQueryCallback, &context );
 		}
+
+		b3EvaluateContinuousCandidates( &context );
+		b3Array_Clear( context.shapeIds );
 	}
 
 	const float speculativeScalar = B3_SPECULATIVE_DISTANCE;
@@ -685,6 +738,8 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 	taskContext->distanceIterations = b3MaxInt( taskContext->distanceIterations, context.distanceIterations );
 	taskContext->pushBackIterations = b3MaxInt( taskContext->pushBackIterations, context.pushBackIterations );
 	taskContext->rootIterations = b3MaxInt( taskContext->rootIterations, context.rootIterations );
+
+	b3Array_Destroy( context.shapeIds );
 
 	b3TracyCZoneEnd( ccd );
 }
