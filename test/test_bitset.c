@@ -24,6 +24,51 @@ int TestBitMath( void )
 	return 0;
 }
 
+int TestPopCount( void )
+{
+	// A reference count so the test does not depend on the popcount instruction.
+	// Values that live entirely in one half of the block catch a 32-bit build
+	// that forgets to add both halves of the split.
+	uint64_t blocks[] = {
+		0,						// no bits
+		1,						// low half only
+		0xFFFFFFFFull,			// low half full
+		0x100000000ull,			// high half only
+		0xFFFFFFFF00000000ull,	// high half full
+		0x8000000000000000ull,	// top bit
+		0x8000000080000001ull,	// both halves
+		0x0123456789ABCDEFull,
+		0xF0F0F0F0F0F0F0F0ull,
+		~0ull,					// every bit
+	};
+
+	for ( int i = 0; i < ARRAY_COUNT( blocks ); ++i )
+	{
+		int expected = 0;
+		for ( int bit = 0; bit < 64; ++bit )
+		{
+			expected += (int)( ( blocks[i] >> bit ) & 1 );
+		}
+
+		ENSURE( b3PopCount64( blocks[i] ) == expected );
+	}
+
+	struct b3BitSet bitSet = b3CreateBitSet( COUNT );
+	b3SetBitCountAndClear( &bitSet, COUNT );
+
+	// 65 bits spans two blocks, so the count has to cover both halves.
+	b3SetBit( &bitSet, 0 );
+	b3SetBit( &bitSet, 32 );
+	b3SetBit( &bitSet, 63 );
+	b3SetBit( &bitSet, 64 );
+	b3SetBit( &bitSet, 65 );
+	ENSURE( b3CountSetBits( &bitSet ) == 5 );
+
+	b3DestroyBitSet( &bitSet );
+
+	return 0;
+}
+
 int TestBitSet( void )
 {
 	struct b3BitSet bitSet = b3CreateBitSet( COUNT );
@@ -58,6 +103,7 @@ int TestBitSet( void )
 int BitTest( void )
 {
 	RUN_SUBTEST( TestBitMath );
+	RUN_SUBTEST( TestPopCount );
 	RUN_SUBTEST( TestBitSet );
 	return 0;
 }
