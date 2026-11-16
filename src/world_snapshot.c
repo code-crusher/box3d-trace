@@ -1244,7 +1244,14 @@ bool b3DeserializeIntoShell( const uint8_t* data, int size, b3World* world, b3Re
 			{
 				b3SnapR_Bytes( r, world->bodies.data + i, sizeof( b3Body ) );
 				world->bodies.data[i].userData = NULL;
+
+				// Body move events are per step scratch and are not part of the snapshot. Drop the
+				// index so a body put to sleep before the next step cannot write through a stale one.
+				world->bodies.data[i].bodyMoveIndex = B3_NULL_INDEX;
 			}
+
+			// The restored world has no body move events. Do not expose events from a prior state.
+			b3Array_Clear( world->bodyMoveEvents );
 		}
 	}
 

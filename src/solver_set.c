@@ -226,13 +226,16 @@ void b3TrySleepIsland( b3World* world, int islandId )
 
 			// Update the body move event to indicate this body fell asleep
 			// It could happen the body is forced asleep before it ever moves.
-			if ( body->bodyMoveIndex != B3_NULL_INDEX )
+			// The index refers to the move events of the most recent step, so it can be stale when
+			// there are no move events, for example after a zero time step or a snapshot restore.
+			int moveIndex = body->bodyMoveIndex;
+			body->bodyMoveIndex = B3_NULL_INDEX;
+			if ( 0 <= moveIndex && moveIndex < world->bodyMoveEvents.count )
 			{
-				b3BodyMoveEvent* moveEvent = b3Array_Get( world->bodyMoveEvents, body->bodyMoveIndex );
+				b3BodyMoveEvent* moveEvent = world->bodyMoveEvents.data + moveIndex;
 				B3_ASSERT( moveEvent->bodyId.index1 - 1 == bodyId );
 				B3_ASSERT( moveEvent->bodyId.generation == body->generation );
 				moveEvent->fellAsleep = true;
-				body->bodyMoveIndex = B3_NULL_INDEX;
 			}
 
 			int awakeBodyIndex = body->localIndex;
@@ -580,8 +583,10 @@ void b3TransferBody( b3World* world, b3SolverSet* targetSet, b3SolverSet* source
 	b3BodySim* targetSim = b3Array_Emplace( targetSet->bodySims );
 	memcpy( targetSim, sourceSim, sizeof( b3BodySim ) );
 
-	// Clear transient body flags
+	// Clear transient body flags and the move event index. The index is only meaningful while the
+	// body stays in its set, and a later step assigns a fresh one.
 	body->flags &= ~b3_bodyTransientFlags;
+	body->bodyMoveIndex = B3_NULL_INDEX;
 	targetSim->flags &= ~(b3_isFast | b3_bodyTransientFlags);
 
 	// Remove body sim from solver set that owns it

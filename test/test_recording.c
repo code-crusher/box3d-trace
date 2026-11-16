@@ -289,6 +289,66 @@ static int MidStreamNoContacts( void )
 	return 0;
 }
 
+// A restored body keeps its old body move index. Putting it to sleep before the first recorded
+// step used to write through that stale index, past the end of the replay world's move event
+// array. Discussion #197.
+static int SleepAfterRestore( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, 0.5f };
+	b3BodyId bodyIds[16];
+	for ( int i = 0; i < 16; ++i )
+	{
+		b3BodyDef bodyDef = b3DefaultBodyDef();
+		bodyDef.type = b3_dynamicBody;
+		bodyDef.position = (b3Pos){ 2.0f * i, 10.0f, 0.0f };
+		bodyIds[i] = b3CreateBody( worldId, &bodyDef );
+		b3ShapeDef shapeDef = b3DefaultShapeDef();
+		b3CreateSphereShape( bodyIds[i], &shapeDef, &sphere );
+	}
+
+	// One step gives every body a move index, so the snapshot carries large indices.
+	float timeStep = 1.0f / 60.0f;
+	int subStepCount = 4;
+	b3World_Step( worldId, timeStep, subStepCount );
+
+	// Record with the stepped world as the seed snapshot, then sleep a body before the next step.
+	b3Recording* rec = b3CreateRecording( 0 );
+	ENSURE( rec != NULL );
+	b3World_StartRecording( worldId, rec );
+	b3Body_SetAwake( bodyIds[15], false );
+	b3World_Step( worldId, timeStep, subStepCount );
+	b3World_StopRecording( worldId );
+	b3DestroyWorld( worldId );
+
+	ENSURE( b3ValidateReplay( b3Recording_GetData( rec ), b3Recording_GetSize( rec ), 1 ) );
+
+	// The same write happens with no recorded op: sleep a restored body directly before stepping.
+	// The manual sleep changes state the recording does not know about, so do not check the
+	// recorded state hash here. The point is that the sleep is safe and the replay keeps running.
+	b3RecPlayer* player = b3CreatePlayer( b3Recording_GetData( rec ), b3Recording_GetSize( rec ), 1 );
+	ENSURE( player != NULL );
+	ENSURE( b3RecPlayer_GetBodyCount( player ) == 16 );
+
+	for ( int i = 0; i < b3RecPlayer_GetBodyCount( player ); ++i )
+	{
+		b3BodyId restored = b3RecPlayer_GetBodyId( player, i );
+		ENSURE( b3Body_IsValid( restored ) );
+		b3Body_SetAwake( restored, false );
+		ENSURE( b3Body_IsAwake( restored ) == false );
+	}
+
+	// The replay still steps cleanly after the bodies are put to sleep.
+	ENSURE( b3RecPlayer_StepFrame( player ) );
+	ENSURE( b3RecPlayer_GetFrame( player ) == 1 );
+
+	b3DestroyPlayer( player );
+	b3DestroyRecording( rec );
+	return 0;
+}
+
 // Mid-stream snapshot with contacts: bodies touching ground with warm-start manifolds.
 static int MidStreamContacts( void )
 {
@@ -2488,6 +2548,7 @@ int RecordingTest( void )
 	RUN_SUBTEST( EmptyWorldRoundTrip );
 	RUN_SUBTEST( HullDedup );
 	RUN_SUBTEST( MidStreamNoContacts );
+	RUN_SUBTEST( SleepAfterRestore );
 	RUN_SUBTEST( MidStreamContacts );
 	RUN_SUBTEST( CrossWidthReplay );
 	RUN_SUBTEST( StagedStepCreationPose );

@@ -1797,6 +1797,92 @@ static int BodySimLocatorTest( void )
 	return LocatorFastFlagTest();
 }
 
+// A body move index belongs to the move events of the step that wrote it. A zero time step clears
+// the events without running the solver, so the index goes stale. Putting such a body to sleep used
+// to read the event array out of bounds. Discussion #197.
+static int ZeroTimeStepSleepTest( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3Sphere sphere = { b3Vec3_zero, 0.5f };
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3BodyId bodyIds[16];
+	for ( int i = 0; i < 16; ++i )
+	{
+		b3BodyDef bodyDef = b3DefaultBodyDef();
+		bodyDef.type = b3_dynamicBody;
+		bodyDef.position = (b3Pos){ 2.0f * i, 10.0f, 0.0f };
+		bodyIds[i] = b3CreateBody( worldId, &bodyDef );
+		b3CreateSphereShape( bodyIds[i], &shapeDef, &sphere );
+	}
+
+	// A normal step gives each body a move index.
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+
+	// A zero time step clears the move events and skips the solver.
+	b3World_Step( worldId, 0.0f, 4 );
+	ENSURE( b3World_GetBodyEvents( worldId ).moveCount == 0 );
+
+	// Sleeping the bodies must not use the stale index.
+	for ( int i = 0; i < 16; ++i )
+	{
+		b3Body_SetAwake( bodyIds[i], false );
+		ENSURE( b3Body_IsAwake( bodyIds[i] ) == false );
+	}
+
+	// The world still steps cleanly with everything asleep.
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
+// Disabling and re-enabling a body changes the awake set, so a move index from before is stale.
+// It can be out of range or, worse, land on another body's event. Sleeping the re-enabled body
+// used to assert on that. Discussion #197.
+static int ReenableSleepTest( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3Sphere sphere = { b3Vec3_zero, 0.5f };
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3BodyId bodyIds[16];
+	for ( int i = 0; i < 16; ++i )
+	{
+		b3BodyDef bodyDef = b3DefaultBodyDef();
+		bodyDef.type = b3_dynamicBody;
+		bodyDef.position = (b3Pos){ 2.0f * i, 10.0f, 0.0f };
+		bodyIds[i] = b3CreateBody( worldId, &bodyDef );
+		b3CreateSphereShape( bodyIds[i], &shapeDef, &sphere );
+	}
+
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+
+	// Disable the last body so the awake set shrinks. Adding two bodies moves the stale index of
+	// the re-enabled body inside the range of the next step's events, on another body's event.
+	b3Body_Disable( bodyIds[15] );
+	for ( int i = 0; i < 2; ++i )
+	{
+		b3BodyDef bodyDef = b3DefaultBodyDef();
+		bodyDef.type = b3_dynamicBody;
+		bodyDef.position = (b3Pos){ 100.0f + 20.0f * i, 10.0f, 0.0f };
+		b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+		b3CreateSphereShape( bodyId, &shapeDef, &sphere );
+	}
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+
+	b3Body_Enable( bodyIds[15] );
+	b3Body_SetAwake( bodyIds[15], false );
+	ENSURE( b3Body_IsAwake( bodyIds[15] ) == false );
+
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
 int WorldTest( void )
 {
 	RUN_SUBTEST( HelloWorld );
@@ -1808,6 +1894,8 @@ int WorldTest( void )
 	RUN_SUBTEST( TestExplosion );
 	RUN_SUBTEST( TestSensor );
 	RUN_SUBTEST( TestContinuousMoveEvent );
+	RUN_SUBTEST( ZeroTimeStepSleepTest );
+	RUN_SUBTEST( ReenableSleepTest );
 	RUN_SUBTEST( TestContactEvents );
 	RUN_SUBTEST( TestHitEvents );
 	RUN_SUBTEST( TestCompoundHitEvents );
