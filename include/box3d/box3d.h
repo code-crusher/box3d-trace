@@ -515,6 +515,72 @@ B3_API b3RecQueryHit b3RecPlayer_GetFrameQueryHit( const b3RecPlayer* player, in
 
 /**@}*/ // recording
 
+/**
+ * @defgroup snapshot Snapshot
+ * @brief Save a world's simulation state and restore it later, or take it on in another world.
+ *
+ * An image captures everything needed to continue the simulation: bodies, shapes, joints, contacts
+ * with their warm-start impulses, the island and sleep partition, the broad-phase, the id pools and
+ * the name cache. It does not capture host wiring: user data, worker count, task callbacks, the
+ * friction and restitution mixers, the pre-solve and custom filter callbacks.
+ *
+ * Saving and loading are cheap enough to run between steps. A world restored from an image steps
+ * exactly as the saved world would have. Save and load must be called at a step boundary.
+ *
+ * Large shape geometry (hulls, meshes, height fields, compounds) is interned in a context, so an
+ * image holds only a 4-byte id per shape once the context already has that geometry. Geometry the
+ * context lacks travels in the image and is added to the context by the load.
+ *
+ * An image is only portable between builds with the same struct layout, precision and validation
+ * settings. The load rejects an image from a different build.
+ * @{
+ */
+
+/// Opaque store of shape geometry shared by images. Create with b3CreateSnapshotContext.
+typedef struct b3SnapshotContext b3SnapshotContext;
+
+/// Create an empty snapshot context.
+/// @return a new context, owned by the caller
+B3_API b3SnapshotContext* b3CreateSnapshotContext( void );
+
+/// Destroy a context and free the geometry it holds.
+/// @warning this must come after every world restored through it, whose shapes point into it
+/// @param context may be NULL
+B3_API void b3DestroySnapshotContext( b3SnapshotContext* context );
+
+/// Intern the geometry of every shape in a world so images saved through this context can leave it
+/// out. A world that loads those images must use a context that has the same geometry, so peers that
+/// build the same scene add it up front and their images carry only ids.
+/// @param context the context to add to
+/// @param worldId the world whose shape geometry to intern
+B3_API void b3SnapshotContext_AddWorld( b3SnapshotContext* context, b3WorldId worldId );
+
+/// @return the number of geometry entries held by the context
+B3_API int b3SnapshotContext_GetGeometryCount( const b3SnapshotContext* context );
+
+/// Save a world's simulation state.
+/// @param worldId the world to save, which must not be locked
+/// @param context geometry to leave out of the image, may be NULL for a self-contained image
+/// @param data receives a pointer to the image, owned by the context and valid until the next save
+/// on it
+/// @return the size of the image in bytes, or 0 on failure
+B3_API int b3World_SaveSnapshot( b3WorldId worldId, b3SnapshotContext* context, const void** data );
+
+/// Replace everything in a world with a saved image. The world is left untouched if the image is
+/// refused, so a failed load never leaves a world unsafe to use or destroy.
+/// @param worldId the world to overwrite, which must not be locked
+/// @param context receives the geometry the image carries, may be NULL if the image is
+/// self-contained
+/// @param data the image
+/// @param size the size of the image in bytes
+/// @return false if the image was refused, leaving the world unchanged: it is cut short, comes from
+/// another build, or needs geometry the context lacks
+/// @warning the image bytes are trusted. A corrupt image of the right length can crash, now or in a
+/// later step, so an image that travels must be integrity checked by the caller.
+B3_API bool b3World_LoadSnapshot( b3WorldId worldId, b3SnapshotContext* context, const void* data, int size );
+
+/**@}*/ // snapshot
+
 /** @} */ // world
 
 /**

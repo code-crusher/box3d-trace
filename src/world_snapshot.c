@@ -29,6 +29,7 @@
 #include "box3d/collision.h"
 #include "box3d/types.h"
 
+#include <limits.h>
 #include <string.h>
 
 // Snapshot image magic 'BNS3' and version
@@ -545,7 +546,7 @@ static void b3DesWorldConfig( b3SnapReader* r, b3World* world )
 // Serialize the POD scalars with pointers nulled, then the owned materials array, then geometry.
 // A single material lives inline in the struct image.
 // Hull/mesh/heightField/compound are interned into the recording registry; sphere/capsule inline.
-static void b3SerShapes( b3RecBuffer* buf, b3World* world, b3Recording* rec )
+static void b3SerShapes( b3RecBuffer* buf, b3World* world, b3GeometryRegistry* reg )
 {
 	int count = world->shapes.count;
 	b3SnapW_I32( buf, count );
@@ -601,14 +602,14 @@ static void b3SerShapes( b3RecBuffer* buf, b3World* world, b3Recording* rec )
 			case b3_hullShape:
 			{
 				b3SnapW_I32( buf, (int)b3_hullShape );
-				uint32_t gid = b3RecInternHull( rec, src->hull );
+				uint32_t gid = b3InternHullGeometry( reg, src->hull );
 				b3SnapW_U32( buf, gid );
 				break;
 			}
 			case b3_meshShape:
 			{
 				b3SnapW_I32( buf, (int)b3_meshShape );
-				uint32_t gid = b3RecInternMesh( rec, src->mesh.data );
+				uint32_t gid = b3InternMeshGeometry( reg, src->mesh.data );
 				b3SnapW_U32( buf, gid );
 				b3SnapW_Bytes( buf, &src->mesh.scale, sizeof( b3Vec3 ) );
 				break;
@@ -616,14 +617,14 @@ static void b3SerShapes( b3RecBuffer* buf, b3World* world, b3Recording* rec )
 			case b3_heightShape:
 			{
 				b3SnapW_I32( buf, (int)b3_heightShape );
-				uint32_t gid = b3RecInternHeightField( rec, src->heightField );
+				uint32_t gid = b3InternHeightFieldGeometry( reg, src->heightField );
 				b3SnapW_U32( buf, gid );
 				break;
 			}
 			case b3_compoundShape:
 			{
 				b3SnapW_I32( buf, (int)b3_compoundShape );
-				uint32_t gid = b3RecInternCompound( rec, src->compound );
+				uint32_t gid = b3InternCompoundGeometry( reg, src->compound );
 				b3SnapW_U32( buf, gid );
 				break;
 			}
@@ -1029,7 +1030,7 @@ static void b3FreeLiveSimElements( b3World* world )
 	}
 }
 
-int b3SerializeWorld( b3World* world, b3RecBuffer* buf, b3Recording* rec )
+int b3SerializeWorld( b3World* world, b3RecBuffer* buf, b3GeometryRegistry* reg )
 {
 	int startSize = buf->size;
 
@@ -1076,7 +1077,7 @@ int b3SerializeWorld( b3World* world, b3RecBuffer* buf, b3Recording* rec )
 	}
 
 	// Shape sparse array with geometry interning
-	b3SerShapes( buf, world, rec );
+	b3SerShapes( buf, world, reg );
 
 	b3SerPodArray( buf, world->fatAABBs );
 
@@ -1146,14 +1147,15 @@ int b3SerializeWorld( b3World* world, b3RecBuffer* buf, b3Recording* rec )
 	return buf->size - startSize;
 }
 
-bool b3DeserializeIntoShell( const uint8_t* data, int size, b3World* world, b3RecReader* rdr )
+// Check the image header against this build without touching any world. A caller that must refuse a
+// bad image before mutating state validates here first.
+static bool b3ValidateSnapshotHeader( const uint8_t* data, int size )
 {
 	if ( data == NULL || size < (int)sizeof( b3SnapHeader ) )
 	{
 		return false;
 	}
 
-	// Validate header
 	b3SnapHeader hdr;
 	memcpy( &hdr, data, sizeof( hdr ) );
 	if ( hdr.magic != B3_SNAP_MAGIC || hdr.version != B3_SNAP_VERSION )
@@ -1175,6 +1177,16 @@ bool b3DeserializeIntoShell( const uint8_t* data, int size, b3World* world, b3Re
 	if ( hdr.layoutHash != b3ComputeLayoutHash() )
 	{
 		printf( "b3DeserializeIntoShell: layout hash mismatch\n" );
+		return false;
+	}
+
+	return true;
+}
+
+bool b3DeserializeIntoShell( const uint8_t* data, int size, b3World* world, b3RecReader* rdr )
+{
+	if ( b3ValidateSnapshotHeader( data, size ) == false )
+	{
 		return false;
 	}
 
@@ -1379,4 +1391,347 @@ bool b3DeserializeIntoShell( const uint8_t* data, int size, b3World* world, b3Re
 	b3DesNames( r, &world->names );
 
 	return r->ok;
+}
+
+
+// Public snapshot context
+//
+// A context holds the geometry shared by a set of images, so an image carries a 4-byte id per
+// shape rather than a copy of every hull, mesh, height field and compound. Ids are the writer's
+// registry indices, so they stay stable for as long as the writer's context lives.
+//
+// An image trails the entries the writer's context gained during that save. Loading interns them
+// into the reader's context, which dedups by content, and resolves every id the image uses through
+// a temporary slot table, so a reader whose context is a superset of the writer's still resolves
+// correctly. The part of the context the image relies on without carrying is verified by a hash, so
+// two peers that built different geometry get a clean refusal rather than silent corruption.
+//
+// A shape's mesh, height field or compound points at the context's copy after a load, so a context
+// must outlive the worlds restored through it.
+struct b3SnapshotContext
+{
+	b3GeometryRegistry registry;
+
+	// Scratch buffer holding the most recent image. Reused across saves, so a host that saves every
+	// frame pays no allocation.
+	b3RecBuffer image;
+};
+
+// Trailer at the very end of an image, after the carried geometry. The world-state section is
+// variable length, so the trailer is how a load finds the geometry without parsing the world.
+// Fields are written explicitly little endian, so the trailer size is fixed at 24 bytes.
+#define B3_SNAP_TRAILER_MAGIC 0x31545342u // 'BST1'
+#define B3_SNAP_TRAILER_SIZE 24
+
+typedef struct b3SnapTrailer
+{
+	uint32_t magic;
+	uint32_t sharedCount;	 // context entries the writer already had when the save started
+	uint32_t carriedCount;	 // geometry entries the image carries
+	uint32_t geometryOffset; // byte offset of the carried geometry block
+	uint64_t sharedHash;	 // hash over the writer's first sharedCount entries
+} b3SnapTrailer;
+
+b3SnapshotContext* b3CreateSnapshotContext( void )
+{
+	b3SnapshotContext* context = (b3SnapshotContext*)b3Alloc( sizeof( b3SnapshotContext ) );
+	memset( context, 0, sizeof( b3SnapshotContext ) );
+	return context;
+}
+
+void b3DestroySnapshotContext( b3SnapshotContext* context )
+{
+	if ( context == NULL )
+	{
+		return;
+	}
+
+	b3RecBufFree( &context->image );
+	b3FreeRegistry( &context->registry );
+	b3Free( context, sizeof( b3SnapshotContext ) );
+}
+
+// Intern one live shape's geometry. A sphere or capsule holds its geometry inline and has nothing
+// to intern.
+static void b3InternShapeGeometry( b3GeometryRegistry* reg, const b3Shape* shape )
+{
+	switch ( shape->type )
+	{
+		case b3_hullShape:
+			b3InternHullGeometry( reg, shape->hull );
+			break;
+		case b3_meshShape:
+			b3InternMeshGeometry( reg, shape->mesh.data );
+			break;
+		case b3_heightShape:
+			b3InternHeightFieldGeometry( reg, shape->heightField );
+			break;
+		case b3_compoundShape:
+			b3InternCompoundGeometry( reg, shape->compound );
+			break;
+		default:
+			break;
+	}
+}
+
+void b3SnapshotContext_AddWorld( b3SnapshotContext* context, b3WorldId worldId )
+{
+	if ( context == NULL || b3World_IsValid( worldId ) == false )
+	{
+		return;
+	}
+
+	// This only reads geometry, so it may run while the world is locked.
+	b3World* world = b3GetWorldFromId( worldId );
+	for ( int i = 0; i < world->shapes.count; ++i )
+	{
+		const b3Shape* shape = world->shapes.data + i;
+		if ( shape->id == i )
+		{
+			b3InternShapeGeometry( &context->registry, shape );
+		}
+	}
+}
+
+int b3SnapshotContext_GetGeometryCount( const b3SnapshotContext* context )
+{
+	return context == NULL ? 0 : context->registry.entries.count;
+}
+
+// Hash the first count registry entries. Two contexts that agree on this hash hold identical
+// geometry at every id an image that only references those entries can use.
+static uint64_t b3HashRegistryPrefix( const b3GeometryRegistry* reg, int count )
+{
+	uint64_t h = B3_SNAP_FNV_INIT;
+	for ( int i = 0; i < count; ++i )
+	{
+		const b3GeometryEntry* entry = reg->entries.data + i;
+		h = ( h ^ entry->contentHash ) * B3_SNAP_FNV_PRIME;
+		h = ( h ^ (uint64_t)entry->kind ) * B3_SNAP_FNV_PRIME;
+		h = ( h ^ (uint64_t)(uint32_t)entry->byteCount ) * B3_SNAP_FNV_PRIME;
+	}
+	return h;
+}
+
+static void b3SnapWTrailer( b3RecBuffer* buf, const b3SnapTrailer* trailer )
+{
+	b3RecW_U32( buf, trailer->magic );
+	b3RecW_U32( buf, trailer->sharedCount );
+	b3RecW_U32( buf, trailer->carriedCount );
+	b3RecW_U32( buf, trailer->geometryOffset );
+	b3RecW_U64( buf, trailer->sharedHash );
+}
+
+static uint32_t b3SnapReadU32( const uint8_t* p )
+{
+	return (uint32_t)p[0] | ( (uint32_t)p[1] << 8 ) | ( (uint32_t)p[2] << 16 ) | ( (uint32_t)p[3] << 24 );
+}
+
+static uint64_t b3SnapReadU64( const uint8_t* p )
+{
+	return (uint64_t)b3SnapReadU32( p ) | ( (uint64_t)b3SnapReadU32( p + 4 ) << 32 );
+}
+
+static void b3SnapReadTrailer( const uint8_t* p, b3SnapTrailer* trailer )
+{
+	trailer->magic = b3SnapReadU32( p );
+	trailer->sharedCount = b3SnapReadU32( p + 4 );
+	trailer->carriedCount = b3SnapReadU32( p + 8 );
+	trailer->geometryOffset = b3SnapReadU32( p + 12 );
+	trailer->sharedHash = b3SnapReadU64( p + 16 );
+}
+
+int b3World_SaveSnapshot( b3WorldId worldId, b3SnapshotContext* context, const void** data )
+{
+	if ( data != NULL )
+	{
+		*data = NULL;
+	}
+
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL || context == NULL || data == NULL )
+	{
+		return 0;
+	}
+
+	b3RecBuffer* buf = &context->image;
+	buf->size = 0;
+
+	// Geometry the context already holds stays out of the image: the shapes reference it by id.
+	// Anything the world has that the context lacks is interned during the save and carried in the
+	// trailing block, so a peer that never saw that geometry can still load the image.
+	b3SnapTrailer trailer = { 0 };
+	trailer.magic = B3_SNAP_TRAILER_MAGIC;
+	trailer.sharedCount = (uint32_t)context->registry.entries.count;
+	trailer.sharedHash = b3HashRegistryPrefix( &context->registry, (int)trailer.sharedCount );
+
+	b3SerializeWorld( world, buf, &context->registry );
+
+	int entryCountAfter = context->registry.entries.count;
+	trailer.carriedCount = (uint32_t)( entryCountAfter - (int)trailer.sharedCount );
+	trailer.geometryOffset = (uint32_t)buf->size;
+
+	b3SnapW_U32( buf, trailer.carriedCount );
+	for ( int i = (int)trailer.sharedCount; i < entryCountAfter; ++i )
+	{
+		const b3GeometryEntry* entry = context->registry.entries.data + i;
+		b3RecW_U8( buf, (uint8_t)entry->kind );
+		b3RecW_U32( buf, (uint32_t)entry->byteCount );
+		b3RecBufAppend( buf, entry->bytes, entry->byteCount );
+	}
+
+	b3SnapWTrailer( buf, &trailer );
+
+	*data = buf->data;
+	return buf->size;
+}
+
+// Validate the structure of a carried geometry block without touching the context, so a corrupt
+// image is refused before any of it is interned.
+static bool b3CheckGeometryBlock( const uint8_t* block, int blockSize, uint32_t expectedCount )
+{
+	if ( blockSize < 4 || b3SnapReadU32( block ) != expectedCount )
+	{
+		return false;
+	}
+
+	// Every entry is at least a kind byte and a 4-byte length.
+	if ( (uint64_t)expectedCount > (uint64_t)( blockSize - 4 ) / 5 )
+	{
+		return false;
+	}
+
+	int cursor = 4;
+	for ( uint32_t i = 0; i < expectedCount; ++i )
+	{
+		if ( cursor + 5 > blockSize )
+		{
+			return false;
+		}
+		uint8_t kind = block[cursor];
+		uint32_t byteCount = b3SnapReadU32( block + cursor + 1 );
+		cursor += 5;
+		if ( kind > (uint8_t)b3_geometryCompound || byteCount == 0 || byteCount > INT32_MAX ||
+			 (uint64_t)cursor + (uint64_t)byteCount > (uint64_t)blockSize )
+		{
+			return false;
+		}
+		cursor += (int)byteCount;
+	}
+
+	return cursor == blockSize;
+}
+
+// Intern each carried entry and point its writer id at the context entry that now holds it. The
+// context dedups by content, so loading the same image again finds the existing entries and does
+// not grow the context. slots is sized to the writer's registry so ids resolve exactly.
+static void b3ResolveGeometryBlock( b3SnapshotContext* context, const uint8_t* block, int sharedCount,
+									b3RegistrySlot* slots )
+{
+	b3GeometryRegistry* reg = &context->registry;
+	uint32_t count = b3SnapReadU32( block );
+	int cursor = 4;
+
+	for ( uint32_t i = 0; i < count; ++i )
+	{
+		b3GeometryKind kind = (b3GeometryKind)block[cursor];
+		uint32_t byteCount = b3SnapReadU32( block + cursor + 1 );
+		cursor += 5;
+		const uint8_t* bytes = block + cursor;
+		cursor += (int)byteCount;
+
+		uint64_t hash = b3Hash64NonZero( bytes, (int)byteCount );
+		uint32_t id = b3InternGeometry( reg, kind, hash, bytes, (int)byteCount );
+
+		b3RegistrySlot* slot = slots + sharedCount + (int)i;
+		slot->kind = kind;
+		slot->byteCount = (int)byteCount;
+		slot->bytes = reg->entries.data[id].bytes;
+	}
+}
+
+bool b3World_LoadSnapshot( b3WorldId worldId, b3SnapshotContext* context, const void* data, int size )
+{
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL || context == NULL || data == NULL || size < (int)sizeof( b3SnapHeader ) + B3_SNAP_TRAILER_SIZE )
+	{
+		return false;
+	}
+
+	const uint8_t* bytes = (const uint8_t*)data;
+
+	// Refuse an image from another build before anything is touched.
+	if ( b3ValidateSnapshotHeader( bytes, size ) == false )
+	{
+		return false;
+	}
+
+	b3SnapTrailer trailer;
+	b3SnapReadTrailer( bytes + size - B3_SNAP_TRAILER_SIZE, &trailer );
+	if ( trailer.magic != B3_SNAP_TRAILER_MAGIC )
+	{
+		return false;
+	}
+
+	// The world state section ends where the carried geometry starts. Both live between the header
+	// and the trailer.
+	if ( trailer.geometryOffset < (uint32_t)sizeof( b3SnapHeader ) || (uint64_t)trailer.geometryOffset + B3_SNAP_TRAILER_SIZE > (uint64_t)size )
+	{
+		return false;
+	}
+
+	int worldSize = (int)trailer.geometryOffset;
+	int blockSize = size - B3_SNAP_TRAILER_SIZE - worldSize;
+	if ( blockSize < 4 || b3CheckGeometryBlock( bytes + worldSize, blockSize, trailer.carriedCount ) == false )
+	{
+		return false;
+	}
+
+	// The image references ids below sharedCount without carrying them, so the reader's context must
+	// hold exactly that geometry. This refuses a peer that built a different scene instead of
+	// silently binding shapes to the wrong hull or mesh.
+	int sharedCount = (int)trailer.sharedCount;
+	if ( context->registry.entries.count < sharedCount )
+	{
+		printf( "b3World_LoadSnapshot: context lacks %d of the image's geometry entries\n",
+				sharedCount - context->registry.entries.count );
+		return false;
+	}
+	if ( b3HashRegistryPrefix( &context->registry, sharedCount ) != trailer.sharedHash )
+	{
+		printf( "b3World_LoadSnapshot: context geometry does not match the image\n" );
+		return false;
+	}
+
+	int slotCount = sharedCount + (int)trailer.carriedCount;
+	b3RegistrySlot* slots = NULL;
+	if ( slotCount > 0 )
+	{
+		slots = (b3RegistrySlot*)b3Alloc( (size_t)slotCount * sizeof( b3RegistrySlot ) );
+		memset( slots, 0, (size_t)slotCount * sizeof( b3RegistrySlot ) );
+
+		for ( int i = 0; i < sharedCount; ++i )
+		{
+			const b3GeometryEntry* entry = context->registry.entries.data + i;
+			slots[i].kind = entry->kind;
+			slots[i].byteCount = entry->byteCount;
+			slots[i].bytes = entry->bytes;
+		}
+		b3ResolveGeometryBlock( context, bytes + worldSize, sharedCount, slots );
+	}
+
+	b3RecReader rdr;
+	memset( &rdr, 0, sizeof( rdr ) );
+	rdr.slots = slots;
+	rdr.slotCount = slotCount;
+
+	// The slot table is scratch: the world ends up pointing at the context's copies, not at it.
+	bool ok = b3DeserializeIntoShell( bytes, worldSize, world, &rdr );
+
+	if ( slots != NULL )
+	{
+		b3Free( slots, (size_t)slotCount * sizeof( b3RegistrySlot ) );
+	}
+
+	return ok;
 }

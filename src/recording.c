@@ -1042,7 +1042,7 @@ void b3StartRecordingIntoBuffer( b3World* world, b3Recording* recording )
 	// place and the world id stays stable across a restart or backward scrub. An empty world still
 	// serializes a valid blob, so there is no from-creation special case.
 	b3RecBuffer snapBuf = { 0 };
-	b3SerializeWorld( world, &snapBuf, recording );
+	b3SerializeWorld( world, &snapBuf, &recording->registry );
 	hdr.snapshotSize = (uint64_t)snapBuf.size;
 
 	b3RecBufAppend( &recording->buffer, &hdr, (int)sizeof( hdr ) );
@@ -1171,31 +1171,51 @@ b3Recording* b3LoadRecordingFromFile( const char* path )
 
 // Geometry interning helpers
 
-static uint32_t b3RecInternBlob( b3Recording* rec, b3GeometryKind kind, const void* blob, int byteCount )
+static uint32_t b3InternBlob( b3GeometryRegistry* reg, b3GeometryKind kind, const void* blob, int byteCount )
 {
 	const uint8_t* bytes = (const uint8_t*)blob;
 	uint64_t h = b3Hash64NonZero( bytes, byteCount );
-	return b3InternGeometry( &rec->registry, kind, h, bytes, byteCount );
+	return b3InternGeometry( reg, kind, h, bytes, byteCount );
+}
+
+uint32_t b3InternHullGeometry( b3GeometryRegistry* reg, const b3HullData* hull )
+{
+	return b3InternBlob( reg, b3_geometryHull, hull, hull->byteCount );
+}
+
+uint32_t b3InternMeshGeometry( b3GeometryRegistry* reg, const b3MeshData* mesh )
+{
+	return b3InternBlob( reg, b3_geometryMesh, mesh, mesh->byteCount );
+}
+
+uint32_t b3InternHeightFieldGeometry( b3GeometryRegistry* reg, const b3HeightFieldData* hf )
+{
+	return b3InternBlob( reg, b3_geometryHeightField, hf, hf->byteCount );
+}
+
+uint32_t b3InternCompoundGeometry( b3GeometryRegistry* reg, const b3CompoundData* compound )
+{
+	return b3InternBlob( reg, b3_geometryCompound, compound, compound->byteCount );
 }
 
 uint32_t b3RecInternHull( b3Recording* rec, const b3HullData* hull )
 {
-	return b3RecInternBlob( rec, b3_geometryHull, hull, hull->byteCount );
+	return b3InternHullGeometry( &rec->registry, hull );
 }
 
 uint32_t b3RecInternMesh( b3Recording* rec, const b3MeshData* mesh )
 {
-	return b3RecInternBlob( rec, b3_geometryMesh, mesh, mesh->byteCount );
+	return b3InternMeshGeometry( &rec->registry, mesh );
 }
 
 uint32_t b3RecInternHeightField( b3Recording* rec, const b3HeightFieldData* hf )
 {
-	return b3RecInternBlob( rec, b3_geometryHeightField, hf, hf->byteCount );
+	return b3InternHeightFieldGeometry( &rec->registry, hf );
 }
 
 uint32_t b3RecInternCompound( b3Recording* rec, const b3CompoundData* compound )
 {
-	return b3RecInternBlob( rec, b3_geometryCompound, compound, compound->byteCount );
+	return b3InternCompoundGeometry( &rec->registry, compound );
 }
 
 uint64_t b3HashWorldState( b3World* world )

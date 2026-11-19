@@ -376,6 +376,14 @@ uint32_t b3RecInternMesh( b3Recording* rec, const b3MeshData* mesh );
 uint32_t b3RecInternHeightField( b3Recording* rec, const b3HeightFieldData* hf );
 uint32_t b3RecInternCompound( b3Recording* rec, const b3CompoundData* compound );
 
+// Registry level forms. The world snapshot shares one registry across images instead of owning a
+// recording, so it interns straight into the registry. Ids stay stable across images because
+// interning is content deduplicated.
+uint32_t b3InternHullGeometry( b3GeometryRegistry* reg, const b3HullData* hull );
+uint32_t b3InternMeshGeometry( b3GeometryRegistry* reg, const b3MeshData* mesh );
+uint32_t b3InternHeightFieldGeometry( b3GeometryRegistry* reg, const b3HeightFieldData* hf );
+uint32_t b3InternCompoundGeometry( b3GeometryRegistry* reg, const b3CompoundData* compound );
+
 // Lifecycle engine-side hooks
 void b3StartRecordingIntoBuffer( b3World* world, b3Recording* recording );
 void b3StopRecordingInternal( b3World* world );
